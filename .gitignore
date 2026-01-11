@@ -1,13 +1,12 @@
 ## RStudio files
+.Rproj
 .Rproj.user
 
 ## History
 .Rhistory
 
-
 data
-outputd
-
+outputs
 
 analysis/*_cache/
 drafts/*_cache/
@@ -17,7 +16,6 @@ drafts/*_cache/
 *err
 *out
 
-*talk_figures*
 *html
 *png
 *pptx
