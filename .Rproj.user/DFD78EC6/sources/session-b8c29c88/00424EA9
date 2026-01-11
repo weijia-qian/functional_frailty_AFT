@@ -3,7 +3,7 @@
     "path": "~/Research/Frailty/source/main_simulations.R",
     "project_path": "source/main_simulations.R",
     "type": "r_source",
-    "hash": "814426358",
+    "hash": "0",
     "contents": "",
     "dirty": false,
     "created": 1768097838599.0,
@@ -12,8 +12,8 @@
     "properties": {
         "source_window_id": "",
         "Source": "Source",
-        "cursorPosition": "52,12",
-        "scrollLine": "35"
+        "cursorPosition": "44,43",
+        "scrollLine": "25"
     },
     "folds": "",
     "lastKnownWriteTime": 1768101608,
