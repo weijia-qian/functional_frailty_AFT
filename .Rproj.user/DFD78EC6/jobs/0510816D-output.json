@@ -1,8 +1,0 @@
-[1,"Installing 'scam' ...\n"]
-[2,"trying URL 'https://cran.rstudio.com/bin/macosx/big-sur-arm64/contrib/4.5/scam_1.2-20.tgz'\n"]
-[2,"Content type 'application/x-gzip' length 1070668 bytes (1.0 MB)\n======"]
-[2,"======="]
-[2,"================="]
-[1,"The downloaded binary packages are in\n"]
-[1,"\t/var/folders/5c/4jr1blw959l_282rv4y_2l1h0000gn/T//RtmpONOAUN/downloaded_packages\n"]
-[2,"====================\ndownloaded 1.0 MB\n\n\n\n✔ Package 'scam' successfully installed.\n"]
