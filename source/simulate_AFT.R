@@ -99,7 +99,7 @@ simulate_AFT = function(data = dat_func,
   
   # ---- simulate error term z ----
   if (family == "loglogistic"){
-    z <- stats::rlogis(n)
+    z <- stats::rlogis(N)
   } else if (family == "lognormal"){
     #z <- rnorm(n)
     # use Box-Muller transform
