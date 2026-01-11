@@ -1,0 +1,28 @@
+{
+    "id": "FD07BE53",
+    "path": null,
+    "project_path": null,
+    "type": "object_explorer",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1768099390601.0,
+    "source_on_save": false,
+    "relative_order": 7,
+    "properties": {
+        "id": "5c0af3dbcd7343b3922b541ff0396f20",
+        "name": "sim_data",
+        "title": "sim_data",
+        "language": "R",
+        "source_window_id": "",
+        "Source": "Source"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 0,
+    "encoding": "",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1768099390601,
+    "read_only": false,
+    "read_only_alternatives": []
+}

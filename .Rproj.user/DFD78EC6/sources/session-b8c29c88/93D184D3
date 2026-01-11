@@ -1,0 +1,28 @@
+{
+    "id": "93D184D3",
+    "path": "~/Research/Frailty/analysis/simulations.Rmd",
+    "project_path": "analysis/simulations.Rmd",
+    "type": "r_markdown",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1765851095545.0,
+    "source_on_save": false,
+    "relative_order": 3,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "66,42",
+        "scrollLine": "59",
+        "last_setup_crc32": "b8c29c88752a56d0",
+        "docOutlineVisible": "0"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1767150420,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1767150420427,
+    "read_only": false,
+    "read_only_alternatives": []
+}

@@ -1,0 +1,94 @@
+---
+title: "Simulations"
+author: "Weijia Qian"
+date: "2025-12-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(MASS)
+library(refund)
+library(splines)
+library(tidyverse)
+source(here("source", "gibbs.R"))
+load(here("data", "dat_func.Rdata")) # real data
+```
+
+```{r simulate data}
+sim_data <- simulate_AFT(family = "lognormal",
+                         n_cluster = 100,
+                         n_subject = 10,
+                         nS = 100,
+                         beta_type = "simple",
+                         beta0 = 0.5,
+                         sigma = 0.2,
+                         tau = 0.5,
+                         gamma = c(0.3, -0.2),
+                         seed = 42)
+```
+
+```{r gibbs sampler}
+# extract elements from simulated data
+data <- sim_data$data
+s_grid = sim_data$coefficients$time
+Z <- model.matrix(~ Z1 + Z2, data = data)
+
+# run Gibbs sampler
+fit <- gibbs_functional_frailty(
+  time = data$Y,
+  status = data$delta,
+  cluster_id = data$cluster_id,
+  Z = Z,
+  X = data$X,
+  s_grid = s_grid,
+  # tuning / priors
+  K = 20,
+  a_pen = 0.001,      # MUST be > 0 to make D PD
+  lambda = 5000,      
+  sigma_gamma2 = 25, 
+  A = 2, B = 1,      
+  # MCMC
+  n_iter = 20000,
+  n_burn = 10000,
+  n_thin = 1,
+  seed = 42,
+  verbose = TRUE
+)
+```
+
+```{r posterior summaries}
+# gamma
+print(apply(fit$gamma, 2, quantile, probs = c(0.025, 0.5, 0.975)))
+
+# sigma^2, tau^2
+quantile(fit$sigma2, c(0.025, 0.5, 0.975))
+quantile(fit$tau2,   c(0.025, 0.5, 0.975))
+
+# beta(s)
+y_all <- c(
+  fit$beta_mean,
+  fit$beta_q025,
+  fit$beta_q975,
+  data$coefficients$beta1
+)
+
+ylim <- range(y_all)
+pad  <- 0.1 * diff(ylim)
+ylim <- ylim + c(-pad, pad)
+
+plot(x = s_grid, y = fit$beta_mean, type="l", xlab="s", ylab= expression(beta(s)), ylim = ylim, lwd = 2)
+lines(x = s_grid, y = fit$beta_q025, lty = 2)
+lines(x = s_grid, y = fit$beta_q975, lty = 2)
+lines(x = s_grid,  y = sim_data$coefficients$beta1, col = "red", lwd = 2)
+legend(
+  "topleft",
+  legend = c("Posterior mean", "95% CrI", "True beta(s)"),
+  lty = c(1, 2, 1),
+  lwd = c(2, 1, 2),
+  col = c("black", "black", "red"),
+  bty = "n"
+)
+```
+

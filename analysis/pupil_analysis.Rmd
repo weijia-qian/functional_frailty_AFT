@@ -1,0 +1,101 @@
+---
+title: "Pupil Data Analysis"
+author: "Weijia Qian"
+date: "2025-12-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(tidyverse)
+source(here("source", "gibbs.R"))
+load(here("data", "dat_func.Rdata"))
+
+# load real data
+df_func <- readRDS(here("data", "Phase3_Pupillometer_pctChg.rds")) 
+df_scalar <- readRDS(here("data", "ccds2_scalars.rds")) 
+df <- df_scalar %>%
+  distinct(ptid, .keep_all = TRUE) %>%
+  dplyr::select(ptid, age_in_years, bmi) %>%
+  right_join(df_func, by = "ptid")
+
+# create user/non-user variable
+df$is_user <- ifelse(df$use_group == "No Use", 0, 1)
+# set censoring time to 8h
+df$time_since_use <- ifelse(df$is_user == 1, df$mins_since_consump, 480)
+# factorize assessment indicator
+df$mtm <- factor(df$mtm, levels = c("0_Pre", "1_Post1", "2_Post2"))
+```
+
+```{r data cleaning}
+# transpose to wide format
+df_wide <- df %>%
+  dplyr::select(ptid, mtm, eye, trial_id, pupil_sm_pctChg, is_user, time_since_use, age_in_years, bmi) %>%
+  filter(eye == "Right" & mtm == "1_Post1") %>%
+  group_by(trial_id) %>%
+  mutate(frame = row_number()) %>%
+  ungroup() %>%
+  pivot_wider(names_from = frame, values_from = pupil_sm_pctChg, names_prefix = "pct_chg_")
+
+# extract functional matrix X (N x P)
+curve_cols <- paste0("pct_chg_", 1:119)
+stopifnot(all(curve_cols %in% names(df_wide)))
+X <- as.matrix(df_wide[, curve_cols])
+
+# define s_grid (length P)
+# s_grid <- seq(0, 1, length.out = ncol(X))
+s_grid <- sort(unique((df$time)))[-120]
+
+# survival outcome
+time <- df_wide$time_since_use
+status <- df_wide$is_user
+
+# cluster id
+cluster_id <- df_wide$ptid
+
+# scalar covariates design matrix Z
+# Columns are: (Intercept), age_in_years, bmi
+Z <- model.matrix(~ age_in_years + bmi, data = df_wide)
+```
+
+```{r gibbs sampler}
+### run Gibbs sampler
+fit <- gibbs_functional_frailty(
+  time = time,
+  status = status,
+  cluster_id = cluster_id,
+  Z = Z,
+  X = X,
+  s_grid = s_grid,
+  # tuning / priors
+  K = 20,
+  a_pen = 0.001,      # MUST be > 0 to make D PD
+  lambda = 5000,      
+  sigma_gamma2 = 25, 
+  A = 2, B = 1,      
+  # MCMC
+  n_iter = 20000,
+  n_burn = 10000,
+  n_thin = 1,
+  seed = 916,
+  verbose = TRUE
+)
+```
+
+```{r posterior summaries}
+# gamma
+print(apply(fit$gamma, 2, mean))
+print(apply(fit$gamma, 2, quantile, probs = c(0.025, 0.5, 0.975)))
+
+# sigma^2, tau^2
+quantile(fit$sigma2, c(0.025, 0.5, 0.975))
+quantile(fit$tau2,   c(0.025, 0.5, 0.975))
+
+# Posterior summaries for the assessment-specific coefficient functions:
+plot(x = s_grid, y = fit$beta_mean, type="l", xlab="s", ylab="beta(s)", ylim = c(-0.8, 0.8))
+lines(x = s_grid, y = fit$beta_q025)
+lines(x = s_grid, y = fit$beta_q975)
+
+```
+

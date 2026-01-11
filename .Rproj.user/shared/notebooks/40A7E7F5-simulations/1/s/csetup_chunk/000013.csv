@@ -1,0 +1,8 @@
+"0","knitr::opts_chunk$set(echo = TRUE)"
+"0","library(here)"
+"0","library(MASS)"
+"0","library(refund)"
+"0","library(splines)"
+"0","library(tidyverse)"
+"0","source(here(""source"", ""gibbs.R""))"
+"0","load(here(""data"", ""dat_func.Rdata"")) # real data"
