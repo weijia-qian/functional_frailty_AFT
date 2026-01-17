@@ -53,20 +53,17 @@ rmvn_chol <- function(mu, chol_V) {
 
 # ---- Gibbs sampler ----
 gibbs_functional_frailty <- function( 
-    
     time, status, cluster_id, Z, X, s_grid,
     K = 12,
     a_pen = 0.001,
     lambda = 1000,
-    sigma_gamma2 = 25,
+    var_gamma = 100,
     A = 2, B = 1,
     n_iter = 4000,
     n_burn = 1000,
     n_thin = 1,
-    seed = 123,
     verbose = TRUE
 ) {
-  set.seed(seed)
   
   N <- length(time)
   stopifnot(length(status) == N, length(cluster_id) == N)
@@ -131,7 +128,7 @@ gibbs_functional_frailty <- function(
     beta_q025 = NULL,
     beta_q975 = NULL,
     meta = list(N = N, J = J, M = M, K = K, P = P, lambda = lambda, a_pen = a_pen,
-                A = A, B = B, sigma_gamma2 = sigma_gamma2,
+                A = A, B = B, var_gamma = var_gamma,
                 n_iter = n_iter, n_burn = n_burn, n_thin = n_thin)
   )
   colnames(out$gamma) <- colnames(Z)
@@ -144,9 +141,9 @@ gibbs_functional_frailty <- function(
   Xgb <- cbind(Z, W)          # N x (M+K)
   XtX_gb <- crossprod(Xgb)    # (M+K) x (M+K)
   
-  # Prior precision for (gamma,b): blockdiag(1/sigma_gamma2 I, lambda D)
+  # Prior precision for (gamma,b): blockdiag(1/var_gamma I, lambda D)
   Q0_gb <- matrix(0, nrow = M + K, ncol = M + K)
-  Q0_gb[1:M, 1:M] <- diag(1 / sigma_gamma2, M)
+  Q0_gb[1:M, 1:M] <- diag(1 / var_gamma, M)
   Q0_gb[(M + 1):(M + K), (M + 1):(M + K)] <- lambda * Dmat
   
   save_counter <- 0L
@@ -177,7 +174,7 @@ gibbs_functional_frailty <- function(
     
     # # 1) gamma | rest
     # eg <- y_star - as.vector(W %*% b) - u[cluster_id]
-    # Qg <- (ZtZ / sigma2) + diag(1 / sigma_gamma2, M)
+    # Qg <- (ZtZ / sigma2) + diag(1 / var_gamma, M)
     # Vg <- solve(Qg)
     # mug <- Vg %*% (crossprod(Z, eg) / sigma2)
     # gamma <- rmvn_chol(as.vector(mug), chol(Vg))
@@ -218,6 +215,7 @@ gibbs_functional_frailty <- function(
     
     if (verbose && (it %% 1000 == 0)) {
       cat(sprintf("iter %d/%d | sigma2=%.4f tau2=%.4f\n", it, n_iter, sigma2, tau2))
+      cat("SSE/N =", SSE/N, "  sigma2_draw =", sigma2, "\n")
     }
   }
   

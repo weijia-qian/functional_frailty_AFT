@@ -13,7 +13,10 @@ library(refund)
 library(splines)
 library(tidyverse)
 source(here("source", "gibbs.R"))
+source(here("source", "simulate_AFT.R"))
 load(here("data", "dat_func.Rdata")) # real data
+
+set.seed(42)
 ```
 
 ```{r simulate data}
@@ -22,11 +25,11 @@ sim_data <- simulate_AFT(family = "lognormal",
                          n_subject = 10,
                          nS = 100,
                          beta_type = "simple",
-                         beta0 = 0.5,
-                         sigma = 0.2,
-                         tau = 0.5,
-                         gamma = c(0.3, -0.2),
-                         seed = 42)
+                         gamma = c(0.5, 0.3, -0.2),
+                         sigma = 1,
+                         tau = 1,
+                         censor_rate = 0.1)
+mean(sim_data$data$delta)
 ```
 
 ```{r gibbs sampler}
@@ -47,13 +50,12 @@ fit <- gibbs_functional_frailty(
   K = 20,
   a_pen = 0.001,      # MUST be > 0 to make D PD
   lambda = 5000,      
-  sigma_gamma2 = 25, 
+  var_gamma = 100, 
   A = 2, B = 1,      
   # MCMC
   n_iter = 20000,
   n_burn = 10000,
   n_thin = 1,
-  seed = 42,
   verbose = TRUE
 )
 ```
@@ -62,9 +64,9 @@ fit <- gibbs_functional_frailty(
 # gamma
 print(apply(fit$gamma, 2, quantile, probs = c(0.025, 0.5, 0.975)))
 
-# sigma^2, tau^2
-quantile(fit$sigma2, c(0.025, 0.5, 0.975))
+# tau^2, sigma^2
 quantile(fit$tau2,   c(0.025, 0.5, 0.975))
+quantile(fit$sigma2, c(0.025, 0.5, 0.975))
 
 # beta(s)
 y_all <- c(
@@ -90,5 +92,23 @@ legend(
   col = c("black", "black", "red"),
   bty = "n"
 )
+```
+```{r diagnostics}
+# trace plots
+par(mfrow=c(2,2))
+plot(fit$tau2,   type="l", main="tau2",   ylab="", xlab="iter")
+abline(h = (sim_data$coefficients$tau)^2, lwd = 2, col = "red")
+plot(fit$sigma2, type="l", main="sigma2", ylab="", xlab="iter")
+abline(h = (sim_data$coefficients$sigma)^2, lwd = 2, col = "red")
+plot(fit$gamma[, "Z1"], type="l", main="gamma_Z1", ylab="", xlab="iter")
+abline(h = sim_data$coefficients$gamma1, lwd = 2, col = "red")
+plot(fit$gamma[, "Z2"], type="l", main="gamma_Z2", ylab="", xlab="iter")
+abline(h = sim_data$coefficients$gamma2, lwd = 2, col = "red")
+
+# autocorrelation + effective sample size (ESS)
+library(coda)
+mcmc_sigma2 <- mcmc(fit$sigma2)
+acf(mcmc_sigma2)                 # autocorrelation plot
+effectiveSize(mcmc_sigma2)  
 ```
 

@@ -31,25 +31,29 @@ load(here("data", "dat_func.Rdata")) # real data
 ###############################################################
 ## set simulation design elements
 ###############################################################
-family = c("lognormal", "loglogistic")
-n_cluster = c(50, 100, 200)
-n_subject = c(5)
+family = c("lognormal")
+n_cluster = c(100, 200, 500)
+n_subject = c(10)
 nS = c(100)
 beta_type = c('simple')
-tau = c(0.1, 0.5, 2)
+tau = c(0.5, 1, 2)
+sigma = c(0.5, 1, 2)
+censor_rate = c(0.1, 0.25, 0.5)
 seed_start = 1000
-N_iter = 100
+N_iter = 500
 
 params = expand.grid(family = family,
                      n_cluster = n_cluster,
                      n_subject = n_subject,
                      nS = nS,
                      beta_type = beta_type,
-                     tau = tau)
+                     tau = tau,
+                     sigma = sigma,
+                     censor_rate = censor_rate)
 
 ## define number of simulations and parameter scenarios
 if(doLocal) {
-  scenario = 10
+  scenario = 25
   N_iter = 2
 }else{
   # defined from batch script params
@@ -62,34 +66,42 @@ n_subject = params$n_subject[scenario]
 nS = params$nS[scenario]
 beta_type = params$beta_type[scenario]
 tau = params$tau[scenario]
+sigma = params$sigma[scenario]
+censor_rate = params$censor_rate[scenario]
 
 ###############################################################
 ## run simulations
 ###############################################################
-results = vector("list", length = N_iter)
+
+# collect one-row data frames per successful iteration
+coef_list <- vector("list", length = N_iter)
+info_list <- vector("list", length = N_iter)
 
 for(iter in 1:N_iter){
   print(iter)
   # set seed
   seed.iter = (seed_start - 1) * N_iter + iter
-
+  set.seed(seed.iter)
+  
   # simulate data
   sim_data <- simulate_AFT(family = as.character(family), n_cluster = n_cluster, n_subject = n_subject,
-                             nS = nS, beta_type = as.character(beta_type), tau = tau, seed = seed.iter)
-
+                           nS = nS, beta_type = as.character(beta_type), tau = tau, sigma = sigma,
+                           censor_rate = censor_rate)
+  
   res <- tryCatch({
-  ###############################################################
-  ## fit functional frailty AFT  model
-  ###############################################################
-  tic()
     
-  # extract elements from simulated data
-  data <- sim_data$data
-  s_grid = sim_data$coefficients$time
-  Z <- model.matrix(~ Z1 + Z2, data = data)
+    ###############################################################
+    ## fit functional frailty AFT  model
+    ###############################################################
+    tic()
     
-  # run Gibbs sampler
-  fit <- gibbs_functional_frailty(
+    # extract elements from simulated data
+    data <- sim_data$data
+    s_grid = sim_data$coefficients$time
+    Z <- model.matrix(~ Z1 + Z2, data = data)
+    
+    # run Gibbs sampler
+    fit <- gibbs_functional_frailty(
       time = data$Y,
       status = data$delta,
       cluster_id = data$cluster_id,
@@ -99,59 +111,84 @@ for(iter in 1:N_iter){
       # tuning / priors
       K = 20,
       a_pen = 0.001,      # MUST be > 0 to make D PD
-      lambda = 5000,      
-      sigma_gamma2 = 25, 
-      A = 2, B = 1,      
+      lambda = 5000,
+      var_gamma = 25,
+      A = 2, B = 1,
       # MCMC
       n_iter = 10000,
       n_burn = 5000,
       n_thin = 1,
-      seed = 42,
       verbose = TRUE
-  )  
-  
-  time_stamp <- toc(quiet = TRUE)
-  time <- time_stamp$toc - time_stamp$tic
-  
-  ###############################################################
-  ## integrated mean squared errors, pointwise CIs
-  ###############################################################
-  # calculate MSE/ISME and coverage
-  beta1_true <- sim_data$coefficients$beta1
-  beta1_imse <- mean((beta1_true - fit$beta_mean)^2)
-  beta1_cover <- mean((beta1_true > fit$beta_q025) & (beta1_true < fit$beta_q975))
-  
-  tau2_true <- (sim_data$coefficients$tau[1])^2
-  tau2_mse <- (tau2_true - quantile(fit$tau2, 0.5))^2
-  tau2_cover <- (tau2_true > quantile(fit$tau2, 0.025)) & (tau2_true < quantile(fit$tau2, 0.975))
-  
-  sigma2_true <- (sim_data$coefficients$sigma[1])^2
-  sigma2_mse <- (sigma2_true - quantile(fit$sigma2, 0.5))^2
-  sigma2_cover <- (sigma2_true > quantile(fit$sigma2, 0.025)) & (sigma2_true < quantile(fit$sigma2, 0.975))
-  
-  # summary
-  df_coef <- data.frame(beta1_imse, beta1_cover,
-                        tau2_mse, tau2_cover,
-                        sigma2_mse, sigma2_cover)
-  
-  df_info <- data.frame(scenario = scenario,
-                        iter = iter,
-                        seed = seed.iter,
-                        family = family,
-                        n_cluster = n_cluster,
-                        n_subject = n_subject,
-                        nS = nS,
-                        beta_type = beta_type,
-                        tau = tau,
-                        censor_rate = 1 - mean(data$delta),
-                        time
-                        )
-  
-  list(
-    info = df_info,
-    coef = df_coef
-  )
-  
+    )
+    
+    time_stamp <- toc(quiet = TRUE)
+    time <- time_stamp$toc - time_stamp$tic
+    
+    ###############################################################
+    ## integrated mean squared errors, pointwise CIs
+    ###############################################################
+    beta_true <- sim_data$coefficients$beta
+    beta_est <- fit$beta_mean
+    beta_ise <- mean((beta_est - beta_true)^2)
+    beta_cover <- mean((beta_true >= fit$beta_q025) & (beta_true <= fit$beta_q975))
+    
+    gamma_true <- sim_data$coefficients$gamma[1,]
+    gamma_est <- colMeans(fit$gamma)
+    gamma_bias <- gamma_est - gamma_true
+    gamma_se <- (gamma_est - gamma_true)^2
+    q <- apply(fit$gamma, 2, quantile, probs = c(0.025, 0.975), na.rm = TRUE)
+    gamma_cover <- (gamma_true >= q[1, ]) & (gamma_true <= q[2, ])
+    
+    tau2_true <- (sim_data$coefficients$tau[1])^2
+    tau2_est <- mean(fit$tau2)
+    tau2_bias <- tau2_est - tau2_true
+    tau2_se <- (tau2_est - tau2_true)^2
+    tau2_cover <- (tau2_true >= quantile(fit$tau2, 0.025)) & (tau2_true <= quantile(fit$tau2, 0.975))
+    
+    sigma2_true <- (sim_data$coefficients$sigma[1])^2
+    sigma2_est <- mean(fit$sigma2)
+    sigma2_bias <- sigma2_est - sigma2_true
+    sigma2_se <- (sigma2_est - sigma2_true)^2
+    sigma2_cover <- (sigma2_true >= quantile(fit$sigma2, 0.025)) & (sigma2_true <= quantile(fit$sigma2, 0.975))
+    
+    # ---- one-row coef summary ----
+    df_coef <- data.frame(
+      beta_ise   = beta_ise,
+      beta_cover = beta_cover,
+      tau2_est   = tau2_est,
+      tau2_bias  = tau2_bias,
+      tau2_se    = tau2_se,
+      tau2_cover = tau2_cover,
+      sigma2_est   = sigma2_est,
+      sigma2_bias  = sigma2_bias,
+      sigma2_se    = sigma2_se,
+      sigma2_cover = sigma2_cover
+    )
+    
+    df_coef[paste0("gamma_est_",   seq_along(gamma_est))]    <- as.list(gamma_est)
+    df_coef[paste0("gamma_bias_",  seq_along(gamma_bias))]   <- as.list(gamma_bias)
+    df_coef[paste0("gamma_se_",    seq_along(gamma_se))]     <- as.list(gamma_se)
+    df_coef[paste0("gamma_cover_", seq_along(gamma_cover))]  <- as.list(gamma_cover)
+    
+    # ---- one-row info ----
+    df_info <- data.frame(
+      scenario    = scenario,
+      iter        = iter,
+      seed        = seed.iter,
+      family      = family,
+      n_cluster   = n_cluster,
+      n_subject   = n_subject,
+      nS          = nS,
+      beta_type   = beta_type,
+      tau         = tau,
+      sigma       = sigma,
+      censor_rate = censor_rate,
+      event_rate  = mean(data$delta),
+      time        = time
+    )
+    
+    list(info = df_info, coef = df_coef)
+    
   }, error = function(e) {
     warning(sprintf(
       "Iteration %d skipped due to error:\n  %s",
@@ -160,26 +197,27 @@ for(iter in 1:N_iter){
     NULL
   })
   
-  ## only save non-NULL results
   if (!is.null(res)) {
-    results[[iter]] <- res
+    info_list[[iter]] <- res$info
+    coef_list[[iter]] <- res$coef
   }
-
 } # end for loop
 
-# drop NULL entries
-results <- Filter(Negate(is.null), results)
+# drop NULL entries and bind into data frames
+result <- list(
+  info = dplyr::bind_rows(Filter(Negate(is.null), info_list)),
+  coef = dplyr::bind_rows(Filter(Negate(is.null), coef_list))
+)
 
-# record date for analysis; create directory for results
+###############################################################
+## save result
+###############################################################
 Date = gsub("-", "", Sys.Date())
 dir.create(file.path(here::here("outputs"), Date), showWarnings = FALSE)
 
 filename = paste0(here::here("outputs", Date), "/", scenario, ".RDA")
-save(results,
-     file = filename)
+save(result, file = filename)
 
 ###############################################################
 ## end sim
 ###############################################################
-
-

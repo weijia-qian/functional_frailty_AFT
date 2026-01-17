@@ -85,7 +85,6 @@ fit <- gibbs_functional_frailty(
 
 ```{r posterior summaries}
 # gamma
-print(apply(fit$gamma, 2, mean))
 print(apply(fit$gamma, 2, quantile, probs = c(0.025, 0.5, 0.975)))
 
 # sigma^2, tau^2
@@ -93,9 +92,17 @@ quantile(fit$sigma2, c(0.025, 0.5, 0.975))
 quantile(fit$tau2,   c(0.025, 0.5, 0.975))
 
 # Posterior summaries for the assessment-specific coefficient functions:
-plot(x = s_grid, y = fit$beta_mean, type="l", xlab="s", ylab="beta(s)", ylim = c(-0.8, 0.8))
-lines(x = s_grid, y = fit$beta_q025)
-lines(x = s_grid, y = fit$beta_q975)
+plot(x = s_grid, y = fit$beta_mean, type="l", xlab="s", ylab=expression(beta(s)), ylim = c(-0.8, 0.8), lwd = 2)
+lines(x = s_grid, y = fit$beta_q025, lty = 2)
+lines(x = s_grid, y = fit$beta_q975, lty = 2)
+legend(
+  "topleft",
+  legend = c("Posterior mean", "95% CrI"),
+  lty = c(1, 2),
+  lwd = c(2, 1),
+  col = c("black", "black"),
+  bty = "n"
+)
 
 ```
 

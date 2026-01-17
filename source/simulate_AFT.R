@@ -6,11 +6,11 @@ simulate_AFT = function(data = dat_func,
                         tmax = 1,
                         nS = 401,
                         beta_type = c("simple", "complex"),
-                        beta0 = 0.5,
+                        gamma = c(0.5, 0.3, -0.2), # first is intercept
                         sigma = 0.2,
                         tau = 0.5,
-                        gamma = c(0.3, -0.2),
-                        seed = NULL
+                        censor_rate = 0.25
+                        # seed = NULL
                         ){
   
   family <- match.arg(family)
@@ -19,15 +19,21 @@ simulate_AFT = function(data = dat_func,
   # ---- choose beta basis coefficients + censoring upper bound ----
   if (beta_type == "simple") {
     bs_coef = c(0, -1, -0.5, 0.25, 0.25, 0.25)
-    ub = 250
+    if (censor_rate == 0.1){
+      ub = 1800
+    } else if (censor_rate == 0.25){
+      ub = 250
+    } else if (censor_rate == 0.5){
+      ub = 80
+    }
   } else if (beta_type == "complex") {
     bs_coef = c(0, -0.6, -1.2, 0.6, -0.5, 1, 0.5, 0)
     ub = 35
   }
   
-  # ---- seed ----
-  if (is.null(seed)) seed <- sample.int(.Machine$integer.max, 1)
-  set.seed(seed)
+  # # ---- seed ----
+  # if (is.null(seed)) seed <- sample.int(.Machine$integer.max, 1)
+  # set.seed(seed)
   
   # ---- build cluster/subject indexing ----
   N = n_cluster * n_subject
@@ -82,7 +88,7 @@ simulate_AFT = function(data = dat_func,
   # ---- define spline basis for beta(s) on s_grid ----
   k <- length(bs_coef)
   B <- splines::bs(s_grid, df = k, intercept = TRUE) # ns x k
-  beta1 <- B %*% bs_coef
+  beta <- B %*% bs_coef
   
   # ---- numerical integration: ∫ X(s) beta(s) ds ----
   trapz_weights <- function(x) {
@@ -95,7 +101,7 @@ simulate_AFT = function(data = dat_func,
     w
   }
   wts <- trapz_weights(s_grid)
-  num_int <- as.vector((sim_curves * wts) %*% beta1)
+  num_int <- as.vector((sim_curves * wts) %*% beta)
   
   # ---- simulate error term z ----
   if (family == "loglogistic"){
@@ -115,11 +121,12 @@ simulate_AFT = function(data = dat_func,
   frailty <- u[cluster_id]
   
   # ---- generate survival time ----
-  lp <- beta0 + gamma[1] * z1 + gamma[2] * z2 + num_int
+  lp <- gamma[1] + gamma[2] * z1 + gamma[3] * z2 + num_int
   T_true <- exp(lp + frailty + sigma * z)
   
   # ---- censoring ----
   C <- stats::runif(N, 0, ub)
+  # C <- 1e5
   Y <- pmin(T_true, C)
   delta <- as.integer(T_true <= C)
   
@@ -137,14 +144,15 @@ simulate_AFT = function(data = dat_func,
   
   # ---- true coefficient functions ----
   df_coef = data.frame(time = s_grid,
-                       beta0 = rep(beta0, nS),
-                       beta1 = beta1,
+                       beta = beta,
+                       gamma = I(matrix(gamma, ncol = length(gamma), nrow = nS, byrow = TRUE)),
                        sigma = rep(sigma, nS),
-                       tau = rep(tau, nS),
-                       gamma1 = rep(gamma[1], nS),
-                       gamma2 = rep(gamma[2], nS))
+                       tau = rep(tau, nS)
+                       # gamma1 = rep(gamma[1], nS),
+                       # gamma2 = rep(gamma[2], nS),
+                       )
   
-  out <- list(data = sim_data, coefficients = df_coef, family = family, beta_type = beta_type, bs_coef = bs_coef, ub = ub, seed = seed)
+  out <- list(data = sim_data, coefficients = df_coef, family = family, beta_type = beta_type, bs_coef = bs_coef, ub = ub)
   
   out
 }

@@ -1,0 +1,172 @@
+---
+title: "Simulation Results"
+author: "Weijia Qian"
+date: '`r format(Sys.time(), "%Y-%m-%d")`'
+output:
+  html_document: 
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, repr.plot.width = 12, repr.plot.height = 8)
+library(CCMHr)
+library(gt)
+library(kableExtra)
+library(MASS)
+library(patchwork)
+library(refund)
+library(scam)
+library(splines)
+library(tidyverse)
+
+theme_set(theme_minimal() + 
+            theme(legend.position = "bottom",
+                  ))
+# theme(axis.text = element_text(size = 15),
+#         axis.title = element_text(size = 15),
+#         axis.text.x = element_blank(),
+#         axis.ticks.x = element_blank(),
+#         legend.position = "bottom",
+#         legend.box.margin = margin(t = -20, b = 0),
+#         legend.title = element_text(size = 15),
+#         legend.text = element_text(size = 15))
+
+# Define a custom color palette for the methods
+my_colors <- c(
+  "FTTM" = "#440154",
+  # "mgcv LFCM" = "#414487",
+  "LFCM" = "#2A788E",
+  "loglogistic lfAFT" = "#7AD151",
+  "lognormal lfAFT" = "#FDE725"
+)
+fig_dir <- "/Users/weijia/Research/Frailty/analysis/figures"
+
+folder_path <- "/Users/weijia/Research/Frailty/outputs/20260110"
+# folder_path <- "/Users/weijia/Research/FDA/Simulations/Output/20250819"
+rda_files <- list.files(path = folder_path, pattern = "\\.RDA$", full.names = TRUE)
+all_results <- list()
+for (i in 1:length(rda_files)) {
+  all_results[[i]] <- loadRDa(rda_files[[i]])
+}
+```
+
+### Computation Time
+```{r}
+all_info <- data.frame()
+# Loop through all scenarios and iterations to extract 'info'
+for (scenario in all_results) {
+  for (iteration in scenario) {
+    all_info <- rbind(all_info, iteration$info)
+  }
+}
+
+# box plot
+table_Brier <- all_info %>%
+  pivot_longer(cols = c("Brier_faft", "Brier_cox", "Brier_faft2"),
+               names_to = "type",
+               values_to = "value") %>%
+  mutate(est_model = case_when(
+            str_detect(type, "cox") ~ "LFCM",
+            str_detect(type, "fttm") ~ "FTTM",
+            # str_detect(type, "norm") ~ "mgcv lfAFT",
+            str_detect(type, "faft2") ~ "loglogistic lfAFT",
+            .default = "lognormal lfAFT"),
+         est_model = factor(est_model, 
+                            levels = c("lognormal lfAFT", "loglogistic lfAFT", "LFCM", "FTTM")),
+         family = recode(family, "cox.ph" = "CoxPH"),
+         log_value = log(value))
+
+plot_time <- all_info %>%
+  ggplot(aes(factor(tau), time)) + 
+  geom_boxplot(fatten = 1.3) +
+  facet_grid(family~n_cluster, labeller = labeller(n_cluster = label_both, family = label_value), scales = "free") +
+  labs(x = expression(tau), y = "Computation Time")
+plot_time
+# ggsave(file.path(fig_dir, "fig_sim_brier.jpeg"), plot_linear_Brier, width = 6, height = 4, dpi = 500)
+
+```
+
+### MISE for Estimated Coefficient Functions Across Iterations
+```{r}
+all_coef <- data.frame() 
+
+# Loop through all scenarios and iterations to extract 'coef'
+for (scenario in all_results) {
+  for (iteration in scenario) {
+    
+    # Extract data for the current iteration
+    tmp_data <- data.frame(scenario = iteration$info$scenario,
+                           iter = iteration$info$iter,
+                           family = iteration$info$family,
+                           n_cluster = iteration$info$n_cluster,
+                           n_subject = iteration$info$n_subject,
+                           nS = iteration$info$nS,
+                           tau = iteration$info$tau,
+                           beta_type = iteration$info$beta_type,
+                           beta1_mise = iteration$coef$beta1_imse, 
+                           beta1_cover = iteration$coef$beta1_cover,
+                           tau2_mse = iteration$coef$tau2_mse, 
+                           tau2_cover = iteration$coef$tau2_cover,
+                           sigma2_mse = iteration$coef$sigma2_mse, 
+                           sigma2_cover = iteration$coef$sigma2_cover)
+
+    # Append to all_coef
+    all_coef <- rbind(all_coef, tmp_data)
+  }
+}
+
+# Box plot: MISE of beta(s)
+plot_mise_beta <- all_coef %>%
+  ggplot(aes(factor(tau), beta1_mise)) + 
+  geom_boxplot(fatten = 1.3) +
+  facet_grid(family~n_cluster, labeller = labeller(n_cluster = label_both, family = label_value), scales = "free") +
+  labs(x = expression(tau), y = expression("MISE of"~beta(s)))
+plot_mise_beta
+
+# Bar plot: coverage of beta(s)
+plot_cover_beta <- all_coef %>%
+  ggplot(aes(factor(tau), beta1_cover)) + 
+  geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
+  geom_hline(yintercept = 0.95, color = "red")+
+  facet_grid(family~n_cluster, labeller = labeller(n_cluster = label_both, family = label_value), scales = "free") +
+  labs(x = expression(tau), y = expression("Coverage of 95% CI for"~beta(s)))
+plot_cover_beta
+
+# Box plot: MSE of tau2
+plot_mse_tau2 <- all_coef %>%
+  ggplot(aes(factor(tau), tau2_mse)) + 
+  geom_boxplot(fatten = 1.3) +
+  facet_grid(family~n_cluster, labeller = labeller(n_cluster = label_both, family = label_value), scales = "free") +
+  labs(x = expression(tau), y = expression("MSE of"~tau^2))
+plot_mse_tau2
+
+# Bar plot: coverage of tau2
+plot_cover_tau2 <- all_coef %>%
+  ggplot(aes(factor(tau), as.numeric(tau2_cover))) + 
+  geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
+  geom_hline(yintercept = 0.95, color = "red")+
+  facet_grid(family~n_cluster, labeller = labeller(n_cluster = label_both, family = label_value), scales = "free") +
+  labs(x = expression(tau), y = expression("Coverage of 95% CI for"~tau^2))
+plot_cover_tau2
+
+# Box plot: MSE of sigma2
+plot_mse_sigma2 <- all_coef %>%
+  ggplot(aes(factor(tau), sigma2_mse)) + 
+  geom_boxplot(fatten = 1.3) +
+  facet_grid(family~n_cluster, labeller = labeller(n_cluster = label_both, family = label_value), scales = "free") +
+  labs(x = expression(tau), y = expression("MSE of"~sigma^2))
+plot_mse_sigma2
+
+# Bar plot: coverage of sigma2
+plot_cover_sigma2 <- all_coef %>%
+  ggplot(aes(factor(tau), as.numeric(sigma2_cover))) + 
+  geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
+  geom_hline(yintercept = 0.95, color = "red")+
+  facet_grid(family~n_cluster, labeller = labeller(n_cluster = label_both, family = label_value), scales = "free") +
+  labs(x = expression(tau), y = expression("Coverage of 95% CI for"~sigma^2))
+plot_cover_sigma2
+```
+
+
