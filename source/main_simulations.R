@@ -32,14 +32,13 @@ load(here("data", "dat_func.Rdata")) # real data
 ## set simulation design elements
 ###############################################################
 family = c("lognormal")
-n_cluster = c(100, 200, 500)
+n_cluster = c(100) # n_cluster = c(100, 200, 500)
 n_subject = c(10)
 nS = c(100)
-beta_type = c('simple')
-tau = c(0.5, 1, 2)
+beta_type = c('monotone', 'peak1', 'peak2', 'wavy')
+tau = c(1) # tau = c(0.5, 1, 2)
 sigma = c(0.5, 1, 2)
-censor_rate = c(0.1, 0.25, 0.5)
-seed_start = 1000
+censor_rate = c(0.25)
 N_iter = 500
 
 params = expand.grid(family = family,
@@ -53,7 +52,7 @@ params = expand.grid(family = family,
 
 ## define number of simulations and parameter scenarios
 if(doLocal) {
-  scenario = 25
+  scenario = 1
   N_iter = 2
 }else{
   # defined from batch script params
@@ -76,12 +75,12 @@ censor_rate = params$censor_rate[scenario]
 # collect one-row data frames per successful iteration
 coef_list <- vector("list", length = N_iter)
 info_list <- vector("list", length = N_iter)
+seeds <- sample.int(1e8, N_iter)
 
 for(iter in 1:N_iter){
-  print(iter)
+  cat("Scenario", scenario, "| Iteration", iter, "\n")
   # set seed
-  seed.iter = (seed_start - 1) * N_iter + iter
-  set.seed(seed.iter)
+  set.seed(seeds[[iter]])
   
   # simulate data
   sim_data <- simulate_AFT(family = as.character(family), n_cluster = n_cluster, n_subject = n_subject,
@@ -93,7 +92,6 @@ for(iter in 1:N_iter){
     ###############################################################
     ## fit functional frailty AFT  model
     ###############################################################
-    tic()
     
     # extract elements from simulated data
     data <- sim_data$data
@@ -101,6 +99,7 @@ for(iter in 1:N_iter){
     Z <- model.matrix(~ Z1 + Z2, data = data)
     
     # run Gibbs sampler
+    tic()
     fit <- gibbs_functional_frailty(
       time = data$Y,
       status = data$delta,
@@ -109,14 +108,16 @@ for(iter in 1:N_iter){
       X = data$X,
       s_grid = s_grid,
       # tuning / priors
-      K = 20,
+      K = 30,
       a_pen = 0.001,      # MUST be > 0 to make D PD
-      lambda = 5000,
+      lambda_init = 1000,         # smoothing parameter
+      A_lambda = 1, B_lambda = 0.001,
       var_gamma = 25,
-      A = 2, B = 1,
+      A_tau2 = 3, B_tau2 = 2,  # IG(A,B) for tau^2 (shape A, scale B)
+      A_sigma2 = 3, B_sigma2 = 2,  # IG(A,B) for sigma^2 (shape A, scale B)
       # MCMC
-      n_iter = 10000,
-      n_burn = 5000,
+      n_iter = 20000,
+      n_burn = 10000,
       n_thin = 1,
       verbose = TRUE
     )
@@ -129,6 +130,7 @@ for(iter in 1:N_iter){
     ###############################################################
     beta_true <- sim_data$coefficients$beta
     beta_est <- fit$beta_mean
+    beta_bias <- beta_est - beta_true
     beta_ise <- mean((beta_est - beta_true)^2)
     beta_cover <- mean((beta_true >= fit$beta_q025) & (beta_true <= fit$beta_q975))
     
@@ -165,16 +167,17 @@ for(iter in 1:N_iter){
       sigma2_cover = sigma2_cover
     )
     
-    df_coef[paste0("gamma_est_",   seq_along(gamma_est))]    <- as.list(gamma_est)
-    df_coef[paste0("gamma_bias_",  seq_along(gamma_bias))]   <- as.list(gamma_bias)
-    df_coef[paste0("gamma_se_",    seq_along(gamma_se))]     <- as.list(gamma_se)
-    df_coef[paste0("gamma_cover_", seq_along(gamma_cover))]  <- as.list(gamma_cover)
+    df_coef[paste0("gamma_est_",   seq_along(gamma_est) - 1)]    <- as.list(gamma_est)
+    df_coef[paste0("gamma_bias_",  seq_along(gamma_bias) - 1)]   <- as.list(gamma_bias)
+    df_coef[paste0("gamma_se_",    seq_along(gamma_se) - 1)]     <- as.list(gamma_se)
+    df_coef[paste0("gamma_cover_", seq_along(gamma_cover) - 1)]  <- as.list(gamma_cover)
+    df_coef[paste0("beta_bias_", seq_along(beta_bias))]  <- as.list(beta_bias)
     
     # ---- one-row info ----
     df_info <- data.frame(
       scenario    = scenario,
       iter        = iter,
-      seed        = seed.iter,
+      seed        = seeds[[iter]],
       family      = family,
       n_cluster   = n_cluster,
       n_subject   = n_subject,
@@ -185,7 +188,9 @@ for(iter in 1:N_iter){
       censor_rate = censor_rate,
       event_rate  = mean(data$delta),
       time        = time
-    )
+    ) 
+    
+    # ---- one-row beta bias summary ----
     
     list(info = df_info, coef = df_coef)
     

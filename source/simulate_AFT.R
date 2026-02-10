@@ -5,7 +5,9 @@ simulate_AFT = function(data = dat_func,
                         npc = 5,
                         tmax = 1,
                         nS = 401,
-                        beta_type = c("simple", "complex"),
+                        beta_type = c("monotone", "peak1", "peak2", "wavy"),
+                        # bs_coef = c(0, -1, -0.5, 0.25, 0.25, 0.25),
+                        # ub = 1800,
                         gamma = c(0.5, 0.3, -0.2), # first is intercept
                         sigma = 0.2,
                         tau = 0.5,
@@ -16,20 +18,29 @@ simulate_AFT = function(data = dat_func,
   family <- match.arg(family)
   beta_type <- match.arg(beta_type)
   
-  # ---- choose beta basis coefficients + censoring upper bound ----
-  if (beta_type == "simple") {
-    bs_coef = c(0, -1, -0.5, 0.25, 0.25, 0.25)
-    if (censor_rate == 0.1){
-      ub = 1800
-    } else if (censor_rate == 0.25){
-      ub = 250
-    } else if (censor_rate == 0.5){
-      ub = 80
-    }
-  } else if (beta_type == "complex") {
-    bs_coef = c(0, -0.6, -1.2, 0.6, -0.5, 1, 0.5, 0)
-    ub = 35
+  # ---- choose beta basis coefficients ----
+  if (beta_type == "monotone") {
+    bs_coef = c(0.1, -0.15, -0.35, -0.5, -0.5, -0.5)
+  } else if (beta_type == "peak1") {
+    bs_coef = c(0.0, -0.1, 0.4, 1.2, 0.5, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+  } else if (beta_type == "peak2") {
+    bs_coef = c(0.0, -0.1, 0.4, 0.9, 0.3, -0.15, -0.3, 0.2, 0.8, 0.3, 0.0, 0.0)
+  } else if (beta_type == "wavy") {
+    bs_coef = c(0.0, 1.7, -2.1, 2.5, -2.3, 2.1, -1.9, 1.5, -1.25, 1.1, -0.85, 0.6, -0.4, 0.2, 0.0)
   }
+  # if (beta_type == "simple") {
+  #   bs_coef = c(0, -1, -0.5, 0.25, 0.25, 0.25)
+  #   if (censor_rate == 0.1){
+  #     ub = 1800
+  #   } else if (censor_rate == 0.25){
+  #     ub = 250
+  #   } else if (censor_rate == 0.5){
+  #     ub = 80
+  #   }
+  # } else if (beta_type == "complex") {
+  #   bs_coef = c(0, -0.6, -1.2, 0.6, -0.5, 1, 0.5, 0)
+  #   ub = 35
+  # }
   
   # # ---- seed ----
   # if (is.null(seed)) seed <- sample.int(.Machine$integer.max, 1)
@@ -91,15 +102,6 @@ simulate_AFT = function(data = dat_func,
   beta <- B %*% bs_coef
   
   # ---- numerical integration: ∫ X(s) beta(s) ds ----
-  trapz_weights <- function(x) {
-    n <- length(x)
-    dx <- diff(x)
-    w <- numeric(n)
-    w[1] <- dx[1] / 2
-    w[n] <- dx[n - 1] / 2
-    if (n > 2) w[2:(n - 1)] <- (dx[1:(n - 2)] + dx[2:(n - 1)]) / 2
-    w
-  }
   wts <- trapz_weights(s_grid)
   num_int <- as.vector((sim_curves * wts) %*% beta)
   
@@ -107,11 +109,11 @@ simulate_AFT = function(data = dat_func,
   if (family == "loglogistic"){
     z <- stats::rlogis(N)
   } else if (family == "lognormal"){
-    #z <- rnorm(n)
-    # use Box-Muller transform
-    u1 <- runif(N)
-    u2 <- runif(N)
-    z <- sqrt(-2 * log(u1)) * cos(2 * pi * u2)
+    z <- rnorm(N)
+    # # use Box-Muller transform
+    # u1 <- runif(N)
+    # u2 <- runif(N)
+    # z <- sqrt(-2 * log(u1)) * cos(2 * pi * u2)
   } else {
     stop('Invalid family.')
   }
@@ -125,10 +127,14 @@ simulate_AFT = function(data = dat_func,
   T_true <- exp(lp + frailty + sigma * z)
   
   # ---- censoring ----
-  C <- stats::runif(N, 0, ub)
-  # C <- 1e5
-  Y <- pmin(T_true, C)
-  delta <- as.integer(T_true <= C)
+  if (censor_rate > 0){
+    ub <- choose_ub_unif(T_true, censor_rate)
+    C <- stats::runif(N, 0, ub)
+    Y <- pmin(T_true, C)
+  } else {
+    Y <- T_true
+  }
+  delta <- as.integer(Y == T_true)
   
   # ---- save simulated data ----
   sim_data = data.frame(subject_id = seq(1:N), 
@@ -139,7 +145,7 @@ simulate_AFT = function(data = dat_func,
                         Z1 = z1,
                         Z2 = z2,
                         T_true = T_true,
-                        C = C,
+                        # C = C,
                         lp = lp)
   
   # ---- true coefficient functions ----
@@ -148,11 +154,37 @@ simulate_AFT = function(data = dat_func,
                        gamma = I(matrix(gamma, ncol = length(gamma), nrow = nS, byrow = TRUE)),
                        sigma = rep(sigma, nS),
                        tau = rep(tau, nS)
-                       # gamma1 = rep(gamma[1], nS),
-                       # gamma2 = rep(gamma[2], nS),
                        )
   
-  out <- list(data = sim_data, coefficients = df_coef, family = family, beta_type = beta_type, bs_coef = bs_coef, ub = ub)
+  out <- list(data = sim_data, coefficients = df_coef, family = family, beta_type = beta_type, bs_coef = bs_coef, u = u)
   
   out
 }
+
+trapz_weights <- function(x) {
+  n <- length(x)
+  dx <- diff(x)
+  w <- numeric(n)
+  w[1] <- dx[1] / 2
+  w[n] <- dx[n - 1] / 2
+  if (n > 2) w[2:(n - 1)] <- (dx[1:(n - 2)] + dx[2:(n - 1)]) / 2
+  w
+}
+
+choose_ub_unif <- function(T_true, censor_rate, tol = 1e-8) {
+  stopifnot(censor_rate > 0, censor_rate < 1)
+  
+  g <- function(ub) mean(pmin(T_true, ub) / ub) - censor_rate
+  
+  # Lower/upper bracket for uniroot
+  lo <- max(tol, min(T_true[T_true > 0], na.rm = TRUE) * 1e-6)
+  hi <- max(T_true, na.rm = TRUE) * 2 + 1
+  
+  # Ensure bracket has opposite signs: g(lo) ~ 1 - censor_rate > 0, g(hi) < 0
+  if (g(lo) < 0) lo <- tol
+  while (g(hi) > 0) hi <- hi * 2
+  
+  uniroot(g, lower = lo, upper = hi)$root
+}
+
+
