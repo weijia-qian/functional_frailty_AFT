@@ -12,28 +12,31 @@ library(MASS)
 library(refund)
 library(splines)
 library(tidyverse)
-source(here("source", "gibbs.R"))
+
 # source(here("source", "gibbs_2.R"))
-source(here("source", "simulate_AFT.R"))
+
 load(here("data", "dat_func.Rdata")) # real data
 
 # set.seed(42)
 ```
 
 ```{r simulate data}
+source(here("source", "simulate_AFT.R"))
+
 sim_data <- simulate_AFT(family = "lognormal",  # "lognormal" or "loglogistic"
-                         n_cluster = 500,       # number of clusters
+                         n_cluster = 200,       # number of clusters
                          n_subject = 10,        # number of subjects per cluster
                          nS = 100,              # density of s grid
-                         beta_type = "wavy",  # "simple" or "complex"
+                         k0 = 20,
+                         alpha = 0,
+                         beta_type = "peak2",    # "monotone"/"peak1"/"peak2"/"wavy"
                          gamma = c(0.5, 0.3, -0.2),  # c(intercept, gamma1, gamma2)
-                         tau = 0.5,               # SD of random noise
-                         sigma = 0.5,             # SD of frailty term
-                         censor_rate = 0.1        # 0/0.1/0.25/0.5
+                         tau = 1,               # SD of random noise
+                         sigma = 1,             # SD of frailty term
+                         censor_rate = 0.1      
                          )
 mean(sim_data$data$delta)
-summary(sim_data$data$Y
-        )
+summary(sim_data$data$Y)
 ```
 
 ```{r gibbs sampler}
@@ -41,6 +44,24 @@ summary(sim_data$data$Y
 data <- sim_data$data
 s_grid = sim_data$coefficients$time
 Z <- model.matrix(~ Z1 + Z2, data = data)
+W <- data$W
+
+# numerical rank
+sv <- svd(data$W)$d
+# plot(sv / max(sv), log="y", type="b")
+tol <- max(dim(data$W)) * .Machine$double.eps * max(sv)
+rank <- sum(sv > tol)
+rank
+
+# entropy effective rank
+p <- sv / sum(sv)
+rank_eff <- exp(-sum(p * log(p)))
+rank_eff
+```
+
+
+```{r gibbs sampler}
+source(here("source", "gibbs.R"))
 
 # run Gibbs sampler
 fit <- gibbs_functional_frailty(
@@ -51,9 +72,9 @@ fit <- gibbs_functional_frailty(
   X = data$X,            # functional covariate matrix
   s_grid = s_grid,
   # tuning / priors
-  K = 30,                # df of B-splines
-  # lambda = 1000,
-  lambda_init = 1000,         # smoothing parameter
+  K = 20,                # df of B-splines
+  # lambda = 100,
+  lambda_init = 100,         # smoothing parameter
   A_lambda = 1, B_lambda = 0.001, # gamma(A,B) for lambda
   var_gamma = 100,       # variance for gamma prior (N(0, var_gamma I))
   A_tau2 = 3, B_tau2 = 2,  # IG(A,B) for tau^2 (shape A, scale B)
@@ -81,22 +102,26 @@ y_all <- c(
   fit$beta_mean,
   fit$beta_q025,
   fit$beta_q975,
-  data$coefficients$beta1
+  sim_data$coefficients$beta
 )
 
 ylim <- range(y_all)
 pad  <- 0.1 * diff(ylim)
 ylim <- ylim + c(-pad, pad)
 
-plot(x = s_grid, y = fit$beta_mean, type="l", xlab="s", ylab= expression(beta(s)), ylim = ylim, lwd = 2)
+plot(x = s_grid, y = fit$beta_mean, type="l", xlab="s", ylab= expression(beta(s)), 
+     ylim = ylim,
+     # main="Monotone (K = 6)",
+     lwd = 2
+     )
 lines(x = s_grid, y = fit$beta_q025, lty = 2)
 lines(x = s_grid, y = fit$beta_q975, lty = 2)
-lines(x = s_grid, y = fit$beta_cma_lower, lty=3)
-lines(x = s_grid, y = fit$beta_cma_upper, lty=3)
+# lines(x = s_grid, y = fit$beta_cma_lower, lty=3)
+# lines(x = s_grid, y = fit$beta_cma_upper, lty=3)
 lines(x = s_grid,  y = sim_data$coefficients$beta, col = "red", lwd = 2)
 legend(
   "topleft",
-  legend = c("Posterior mean", "Pointwise 95%", "CMA 95%", "True beta(s)"),
+  legend = c("Posterior mean", "Pointwise 95% CI", "CMA 95% CI", "True beta(s)"),
   lty = c(1, 2, 3, 1),
   lwd = c(2, 1, 1, 2),
   col = c("black", "black", "black", "red"),
@@ -109,6 +134,8 @@ u_true <- sim_data$u
 u_bias <- u_mean - u_true
 plot(u_mean, u_true)
 abline(a=0, b=1, col='red')
+
+mean(fit$lambda)
 
 ```
 
@@ -131,8 +158,8 @@ plot(fit$lambda, type="l", main="lambda", ylab="", xlab="iter")
 # effectiveSize(mcmc_sigma2)  
 ```
 ```{r}
-all_coef %>%
-  group_by(sigma, censor_rate) %>%
-  summarise(mean_sigma2_bias = mean(sigma2_bias))
+table_sigma_bias <- all_coef %>%
+  group_by(beta_type, sigma) %>%
+  summarise(mean_sigma2_bias = round(mean(sigma2_bias),3))
 ```
 

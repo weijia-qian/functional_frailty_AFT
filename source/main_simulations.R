@@ -32,11 +32,11 @@ load(here("data", "dat_func.Rdata")) # real data
 ## set simulation design elements
 ###############################################################
 family = c("lognormal")
-n_cluster = c(100) # n_cluster = c(100, 200, 500)
-n_subject = c(10)
+n_cluster = c(100, 200, 500)
+n_subject = c(5)
 nS = c(100)
 beta_type = c('monotone', 'peak1', 'peak2', 'wavy')
-tau = c(1) # tau = c(0.5, 1, 2)
+tau = c(0.5, 1, 2)
 sigma = c(0.5, 1, 2)
 censor_rate = c(0.25)
 N_iter = 500
@@ -83,9 +83,18 @@ for(iter in 1:N_iter){
   set.seed(seeds[[iter]])
   
   # simulate data
-  sim_data <- simulate_AFT(family = as.character(family), n_cluster = n_cluster, n_subject = n_subject,
-                           nS = nS, beta_type = as.character(beta_type), tau = tau, sigma = sigma,
-                           censor_rate = censor_rate)
+  sim_data <- simulate_AFT(family = as.character(family),  # "lognormal" or "loglogistic"
+                           n_cluster = n_cluster,       # number of clusters
+                           n_subject = n_subject,        # number of subjects per cluster
+                           nS = nS,              # density of s grid
+                           k0 = 20,
+                           alpha = 0,
+                           beta_type = as.character(beta_type),    # "monotone"/"peak1"/"peak2"/"wavy"
+                           gamma = c(0.5, 0.3, -0.2),  # c(intercept, gamma1, gamma2)
+                           tau = tau,               # SD of random noise
+                           sigma = sigma,             # SD of frailty term
+                           censor_rate = censor_rate      
+                           )
   
   res <- tryCatch({
     
@@ -108,11 +117,11 @@ for(iter in 1:N_iter){
       X = data$X,
       s_grid = s_grid,
       # tuning / priors
-      K = 30,
+      K = 20,
       a_pen = 0.001,      # MUST be > 0 to make D PD
       lambda_init = 1000,         # smoothing parameter
       A_lambda = 1, B_lambda = 0.001,
-      var_gamma = 25,
+      var_gamma = 100,
       A_tau2 = 3, B_tau2 = 2,  # IG(A,B) for tau^2 (shape A, scale B)
       A_sigma2 = 3, B_sigma2 = 2,  # IG(A,B) for sigma^2 (shape A, scale B)
       # MCMC

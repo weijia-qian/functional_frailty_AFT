@@ -21,7 +21,7 @@ library(scam)
 library(splines)
 library(tidyverse)
 
-theme_set(theme_minimal() + 
+theme_set(theme_bw() + 
             theme(legend.position = "bottom",
                   ))
 # theme(axis.text = element_text(size = 15),
@@ -43,8 +43,8 @@ my_colors <- c(
 )
 fig_dir <- "/Users/weijia/Research/Frailty/analysis/figures"
 
-folder_path <- "/Users/weijia/Research/Frailty/outputs/20260117"
-# folder_path <- "/Users/weijia/Research/FDA/Simulations/Output/20250819"
+folder_path <- "/Users/weijia/Research/Frailty/outputs/20260210"
+# folder_path <- "/Users/weijia/Research/Frailty/outputs/20260117"
 rda_files <- list.files(path = folder_path, pattern = "\\.RDA$", full.names = TRUE)
 all_results <- list()
 for (i in 1:length(rda_files)) {
@@ -61,12 +61,12 @@ for (scenario in all_results) {
 }
 
 
-plot_time <- all_info %>%
-  ggplot(aes(factor(tau), time)) + 
-  geom_boxplot(fatten = 1.3) +
-  facet_grid(family~n_cluster, labeller = labeller(n_cluster = label_both, family = label_value), scales = "free") +
-  labs(x = expression(tau), y = "Computation Time")
-plot_time
+# plot_time <- all_info %>%
+#   ggplot(aes(factor(tau), time)) + 
+#   geom_boxplot(fatten = 1.3) +
+#   facet_grid(family~n_cluster, labeller = labeller(n_cluster = label_both, family = label_value), scales = "free") +
+#   labs(x = expression(tau), y = "Computation Time")
+# plot_time
 # ggsave(file.path(fig_dir, "fig_sim_brier.jpeg"), plot_linear_Brier, width = 6, height = 4, dpi = 500)
 
 ```
@@ -93,22 +93,58 @@ table_coef <- all_coef %>%
             sigma2_mean_cover = mean(sigma2_cover)
             )
 
+table_beta_bias <- all_coef %>%
+  group_by(beta_type, family, n_cluster, tau, sigma, censor_rate) %>%
+  summarise(
+    across(
+      starts_with("beta_bias_"),
+      ~ mean(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  )  %>%
+  pivot_longer(
+    cols = starts_with("beta_bias_"),
+    names_to = "beta_index",
+    values_to = "bias"
+  ) %>%
+  mutate(
+    beta_index = as.integer(gsub("beta_bias_", "", beta_index))
+  )
+
+plot_beta_bias <- ggplot(
+  table_beta_bias,
+  aes(x = beta_index, y = bias, color = factor(sigma), group = sigma)
+) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.4) +
+  geom_line(linewidth = 1) +
+  # geom_point(size = 2) +
+  facet_wrap(~ beta_type, scales = "free_y") +
+  labs(
+    x = "Function index",
+    y = "Bias",
+    color = expression(sigma),
+    title = expression("Bias of"~beta(s))
+  )
+plot_beta_bias
+
 # Box plot: MISE of beta(s)
 plot_beta_mise <- all_coef %>%
-  filter(censor_rate == 0.1) %>%
-  ggplot(aes(factor(tau), beta_ise)) + 
+  # filter(censor_rate == 0.1) %>%
+  ggplot(aes(factor(sigma), beta_ise)) +
   geom_boxplot(fatten = 1.3) +
-  facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
-  labs(x = expression(tau), y = expression("MISE of"~beta(s)))
+  facet_grid(~beta_type, labeller = label_value, scales = "free") +
+  # facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
+  labs(x = expression(sigma), y = expression("MISE of"~beta(s)))
 plot_beta_mise
 
 # Bar plot: coverage of beta(s)
 plot_beta_cover <- all_coef %>%
-  ggplot(aes(factor(tau), beta_cover)) + 
+  ggplot(aes(factor(sigma), beta_cover)) + 
   geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-  geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-  facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
-  labs(x = expression(tau), y = expression("Coverage of 95% CI for"~beta(s)))
+  geom_hline(yintercept = 0.95, color = "red", lty = "dashed") +
+  facet_grid(~beta_type, labeller = label_value, scales = "free") +
+  # facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
+  labs(x = expression(sigma), y = expression("Coverage of 95% CI for"~beta(s)))
 plot_beta_cover
 ```
 
@@ -117,30 +153,33 @@ plot_beta_cover
 # Box plot: bias of tau2
 plot_tau2_bias <- all_coef %>%
   filter(censor_rate == 0.25) %>%
-  ggplot(aes(factor(tau), tau2_bias)) + 
+  ggplot(aes(factor(sigma), tau2_bias)) + 
   geom_boxplot(fatten = 1.3) +
   geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-  facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
-  labs(x = expression(tau), y = expression("Bias of"~sigma^2))
+  facet_grid(~beta_type, labeller = label_value, scales = "free") +
+  # facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
+  labs(x = expression(sigma), y = expression("Bias of"~tau^2))
 plot_tau2_bias
 
 # Box plot: MSE of tau2
 plot_tau2_mse <- all_coef %>%
   filter(censor_rate == 0.25) %>%
-  ggplot(aes(factor(tau), tau2_se)) + 
+  ggplot(aes(factor(sigma), tau2_se)) + 
   geom_boxplot(fatten = 1.3) +
-  facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
-  labs(x = expression(tau), y = expression("MSE of"~sigma^2))
+  facet_grid(~beta_type, labeller = label_value, scales = "free") +
+  # facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
+  labs(x = expression(sigma), y = expression("MSE of"~tau^2))
 plot_tau2_mse
 
 # Bar plot: coverage of tau2
 plot_tau2_cover <- all_coef %>%
   filter(censor_rate == 0.25) %>%
-  ggplot(aes(factor(tau), as.numeric(tau2_cover))) + 
+  ggplot(aes(factor(sigma), as.numeric(tau2_cover))) + 
   geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
   geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-  facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
-  labs(x = expression(tau), y = expression("Coverage of 95% CI for"~sigma^2))
+  facet_grid(~beta_type, labeller = label_value, scales = "free") +
+  # facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
+  labs(x = expression(sigma), y = expression("Coverage of 95% CI for"~tau^2))
 plot_tau2_cover
 ```
 
@@ -149,30 +188,33 @@ plot_tau2_cover
 # Box plot: bias of sigma2
 plot_sigma2_bias <- all_coef %>%
   filter(censor_rate == 0.25) %>%
-  ggplot(aes(factor(tau), sigma2_bias)) + 
+  ggplot(aes(factor(sigma), sigma2_bias)) + 
   geom_boxplot(fatten = 1.3) +
   geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-  facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
-  labs(x = expression(tau), y = expression("Bias of"~sigma^2))
+  facet_grid(~beta_type, labeller = label_value, scales = "free") +
+  # facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
+  labs(x = expression(sigma), y = expression("Bias of"~sigma^2))
 plot_sigma2_bias
 
 # Box plot: MSE of sigma2
 plot_sigma2_mse <- all_coef %>%
   filter(censor_rate == 0.25) %>%
-  ggplot(aes(factor(tau), sigma2_se)) + 
+  ggplot(aes(factor(sigma), sigma2_se)) + 
   geom_boxplot(fatten = 1.3) +
-  facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
-  labs(x = expression(tau), y = expression("MSE of"~sigma^2))
+  facet_grid(~beta_type, labeller = label_value, scales = "free") +
+  # facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
+  labs(x = expression(sigma), y = expression("MSE of"~sigma^2))
 plot_sigma2_mse
 
 # Bar plot: coverage of sigma2
 plot_sigma2_cover <- all_coef %>%
   filter(censor_rate == 0.25) %>%
-  ggplot(aes(factor(tau), as.numeric(sigma2_cover))) + 
+  ggplot(aes(factor(sigma), as.numeric(sigma2_cover))) + 
   geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
   geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-  facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
-  labs(x = expression(tau), y = expression("Coverage of 95% CI for"~sigma^2))
+  facet_grid(~beta_type, labeller = label_value, scales = "free") +
+  # facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
+  labs(x = expression(sigma), y = expression("Coverage of 95% CI for"~sigma^2))
 plot_sigma2_cover
 ```
 
@@ -180,29 +222,32 @@ plot_sigma2_cover
 # Box plot: bias of intercept
 plot_gamma0_bias <- all_coef %>%
   filter(censor_rate == 0.25) %>%
-  ggplot(aes(factor(tau), gamma_bias_1)) + 
+  ggplot(aes(factor(sigma), gamma_bias_1)) + 
   geom_boxplot(fatten = 1.3) +
   geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-  facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
-  labs(x = expression(tau), y = "Bias of intercept")
+  facet_grid(~beta_type, labeller = label_value, scales = "free") +
+  # facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
+  labs(x = expression(sigma), y = "Bias of intercept")
 plot_gamma0_bias
 
 # Box plot: MSE of intercept
 plot_gamma0_mse <- all_coef %>%
   filter(censor_rate == 0.25) %>%
-  ggplot(aes(factor(tau), gamma_se_1)) + 
+  ggplot(aes(factor(sigma), gamma_se_1)) + 
   geom_boxplot(fatten = 1.3) +
-  facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
+  facet_grid(~beta_type, labeller = label_value, scales = "free") +
+  # facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
   labs(x = expression(tau), y = "MSE of intercept")
 plot_gamma0_mse
 
 # Bar plot: coverage of intercept
 plot_gamma0_cover <- all_coef %>%
   filter(censor_rate == 0.25) %>%
-  ggplot(aes(factor(tau), as.numeric(gamma_cover_1))) + 
+  ggplot(aes(factor(sigma), as.numeric(gamma_cover_1))) + 
   geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
   geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-  facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
+  facet_grid(~beta_type, labeller = label_value, scales = "free") +
+  # facet_grid(sigma~n_cluster, labeller = labeller(n_cluster = label_both, sigma = label_both), scales = "free") +
   labs(x = expression(tau), y = "Coverage of 95% CI for intercept")
 plot_gamma0_cover
 ```

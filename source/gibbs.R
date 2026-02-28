@@ -90,6 +90,7 @@ gibbs_functional_frailty <- function(
     lambda_init = 1000,
     A_lambda = 1,
     B_lambda = 0.001,
+    lambda = 1000,
     
     var_gamma = 100,
     A_tau2 = 3, B_tau2 = 2,
@@ -157,8 +158,9 @@ gibbs_functional_frailty <- function(
     beta_cma_qd    = NULL,
     beta_cma_sd    = NULL,
     meta = list(
-      N = N, J = J, M = M, K = K, P = P, a_pen = a_pen,
-      lambda_init = lambda_init, A_lambda = A_lambda, B_lambda = B_lambda,
+      N = N, J = J, M = M, K = K, P = P, a_pen = a_pen, 
+      lambda_init = lambda_init,
+      A_lambda = A_lambda, B_lambda = B_lambda,
       A_sigma2 = A_sigma2, A_tau2 = A_tau2, B_sigma2 = B_sigma2, B_tau2 = B_tau2,
       var_gamma = var_gamma,
       n_iter = n_iter, n_burn = n_burn, n_thin = n_thin
@@ -241,6 +243,7 @@ gibbs_functional_frailty <- function(
       shape = A_lambda + K / 2,
       rate  = B_lambda + 0.5 * quad_b
     )
+    # lambda <- 10000
     
     # save
     if (it %in% keep_idx) {
