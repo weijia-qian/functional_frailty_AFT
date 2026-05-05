@@ -12,10 +12,9 @@ library(MASS)
 library(refund)
 library(splines)
 library(tidyverse)
-
-# source(here("source", "gibbs_2.R"))
-
-load(here("data", "dat_func.Rdata")) # real data
+# library(devtools)
+# install_github("denizlukusluinan/fcoxFr")
+library(fcoxFr)
 
 # set.seed(42)
 ```
@@ -116,8 +115,8 @@ plot(x = s_grid, y = fit$beta_mean, type="l", xlab="s", ylab= expression(beta(s)
      )
 lines(x = s_grid, y = fit$beta_q025, lty = 2)
 lines(x = s_grid, y = fit$beta_q975, lty = 2)
-# lines(x = s_grid, y = fit$beta_cma_lower, lty=3)
-# lines(x = s_grid, y = fit$beta_cma_upper, lty=3)
+lines(x = s_grid, y = fit$beta_cma_lower, lty=3)
+lines(x = s_grid, y = fit$beta_cma_upper, lty=3)
 lines(x = s_grid,  y = sim_data$coefficients$beta, col = "red", lwd = 2)
 legend(
   "topleft",
@@ -162,4 +161,20 @@ table_sigma_bias <- all_coef %>%
   group_by(beta_type, sigma) %>%
   summarise(mean_sigma2_bias = round(mean(sigma2_bias),3))
 ```
+
+```{r fcoxFr}
+fit.cox <- fcoxFr::fpcr(time = as.matrix(data$Y), event = as.matrix(data$delta), 
+                        group = data$cluster_id, X = as.matrix(data$X), Z = Z[, -1],
+                        nb = 20, gp = s_grid)
+
+set.seed(123)
+# Simulate data
+sim_data <- data_generation(n = 100, j = 101, p = 6, gamma0 = rep(0.5, 6),
+                            tau = 0.2, mev = 0.5, theta = 2)
+# Apply fpcr
+fit <- fpcr(time = sim_data$time, event = sim_data$event, X = sim_data$Xt,
+            Z = sim_data$Z, nb = 10, gp = sim_data$gp)
+
+```
+
 

@@ -8,19 +8,49 @@ rinv_gamma_shape_scale <- function(n, shape, scale) {
 }
 
 # ---- Penalty matrix D (PD if a > 0) ----
-penalty_matrix <- function(kp, nS, a) {
-  D <- nS
-  s <- seq(0, 1, length.out = nS)
-  spline_basis <- bs(s, df = kp, intercept = TRUE)  # nS x kp
+penalty_matrix <- function(kp, s_grid, a, basis_type = "bs") {
+  # D <- nS
+  # s <- seq(0, 1, length.out = nS)
+  # spline_basis <- bs(s, df = kp, intercept = TRUE)  # nS x kp
+  # 
+  # diff2 <- matrix(
+  #   rep(c(1, -2, 1, rep(0, D - 3)), D - 2)[1:((D - 2) * D)],
+  #   nrow = D - 2, ncol = D, byrow = TRUE
+  # )
+  # 
+  # P2  <- t(spline_basis) %*% t(diff2) %*% diff2 %*% spline_basis
+  # Pen <- a * diag(kp) + (1 - a) * P2
+  # Pen
+  nS <- length(s_grid)
   
-  diff2 <- matrix(
-    rep(c(1, -2, 1, rep(0, D - 3)), D - 2)[1:((D - 2) * D)],
-    nrow = D - 2, ncol = D, byrow = TRUE
-  )
-  
-  P2  <- t(spline_basis) %*% t(diff2) %*% diff2 %*% spline_basis
-  Pen <- a * diag(kp) + (1 - a) * P2
-  Pen
+  if (basis_type == "bs") {
+    spline_basis <- splines::bs(s_grid, df = kp, intercept = TRUE)  
+    
+    # Construct the second-order difference matrix.
+    diff2 <- diff(diag(nS), differences = 2) 
+    
+    P2  <- t(spline_basis) %*% t(diff2) %*% diff2 %*% spline_basis
+    Pen <- a * diag(kp) + (1 - a) * P2
+    
+    return(Pen)
+    
+  } else {
+    require(mgcv)
+    sm_obj <- smoothCon(s(s_grid, k = kp, bs = basis_type), 
+                        data = data.frame(s_grid = s_grid), 
+                        absorb.cons = FALSE)[[1]]
+    
+    # mgcv provides the exact analytical penalty matrix
+    Pen <- sm_obj$S[[1]]
+    
+    # Add the ridge penalty 'a' to the diagonal to ensure 
+    # strict positive-definiteness for the Gibbs sampler
+    if (a > 0) {
+      diag(Pen) <- diag(Pen) + a
+    }
+    
+    return(Pen)
+  }  
 }
 
 # ---- Trapezoid integration weights on a grid ----
@@ -84,17 +114,16 @@ cma_band <- function(beta_draws, level = 0.95, eps = 1e-12) {
 gibbs_functional_frailty <- function( 
     time, status, cluster_id, Z, X, s_grid,
     K = 12,
+    basis_type = "bs",
     a_pen = 0.001,
-    
-    # lambda prior + init (Gamma shape-rate)
-    lambda_init = 1000,
+    # tuning / priors
+    lambda_init = 5000,
     A_lambda = 1,
     B_lambda = 0.001,
-    lambda = 1000,
-    
     var_gamma = 100,
     A_tau2 = 3, B_tau2 = 2,
     A_sigma2 = 3, B_sigma2 = 2,
+    # MCMC
     n_iter = 4000,
     n_burn = 1000,
     n_thin = 1,
@@ -107,21 +136,40 @@ gibbs_functional_frailty <- function(
   P <- length(s_grid)
   stopifnot(ncol(X) == P)
   
-  cluster_id <- as.integer(factor(cluster_id))
+  # ---- NEW: Capture original cluster levels before coercing to integer ----
+  cluster_factor <- factor(cluster_id)
+  cluster_levels <- levels(cluster_factor)
+  cluster_id <- as.integer(cluster_factor)
   J <- max(cluster_id)
   
   y_obs <- log(time)
   c_log <- y_obs
   cens_idx <- which(status == 0L)
   
-  # build W = ∫ X(s) phi(s) ds with phi from bs(s_grid, df=K)
-  Bmat <- bs(s_grid, df = K, intercept = TRUE)  # P x K
+  # Build Bmat (Basis Matrix) and Dmat (Penalty Matrix)
+  if (basis_type == "bs") {
+    Bmat <- splines::bs(s_grid, df = K, intercept = TRUE)  
+    Dmat <- penalty_matrix(kp = K, s_grid = s_grid, a = a_pen, basis_type = "bs")
+  } else {
+    require(mgcv)
+    sm_obj <- smoothCon(s(s_grid, k = K, bs = basis_type), 
+                        data = data.frame(s_grid = s_grid), 
+                        absorb.cons = FALSE)[[1]]
+    
+    Bmat <- sm_obj$X
+    Dmat <- sm_obj$S[[1]]  # Extract penalty matrix directly from the same object
+    
+    # Add ridge penalty a_pen to ensure positive-definiteness
+    if (a_pen > 0) {
+      diag(Dmat) <- diag(Dmat) + a_pen
+    }
+    
+    K <- ncol(Bmat) 
+  }
+  
   w_int <- trapz_weights(s_grid)
   Xw <- sweep(X, 2, w_int, `*`)
   W <- Xw %*% Bmat  # N x K
-  
-  # penalty matrix D (K x K), PD if a_pen > 0
-  Dmat <- penalty_matrix(kp = K, nS = P, a = a_pen)
   
   # cluster indices
   idx_by_cluster <- split(seq_len(N), cluster_id)
@@ -159,6 +207,8 @@ gibbs_functional_frailty <- function(
     beta_cma_sd    = NULL,
     meta = list(
       N = N, J = J, M = M, K = K, P = P, a_pen = a_pen, 
+      s_grid = s_grid, basis_type = basis_type,
+      cluster_levels = cluster_levels,  # ---- NEW: Save mapping to output ----
       lambda_init = lambda_init,
       A_lambda = A_lambda, B_lambda = B_lambda,
       A_sigma2 = A_sigma2, A_tau2 = A_tau2, B_sigma2 = B_sigma2, B_tau2 = B_tau2,

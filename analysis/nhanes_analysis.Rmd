@@ -1,0 +1,599 @@
+---
+title: "NHANES Analysis"
+author: "Weijia Qian"
+date: "2026-03-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(coxme)
+library(here)
+library(tidyverse)
+library(caret)
+library(survival)
+library(survAUC)
+# library(pec)
+library(mgcv)
+devtools::install_github("weijia-qian/funAFT", force = TRUE)
+library(funAFT)
+library(fcoxFr)
+source(here("source", "gibbs.R"))
+source(here("source", "predict_gibbs.R"))
+source(here("source", "cal_Brier.R"))
+source(here("source", "fcoxFr_supp.R"))
+data <- readRDS(here("data", "nhanes_with_demo.rds"))
+```
+
+
+```{r data cleaning}
+data2 <- data %>%
+  filter(
+    age >= 50 & age <= 80,
+    if_all(c(time, event, age, gender, race, BMI, CHD, TMIMS), ~ !is.na(.)),
+    time > 0,
+    CHD %in% c("Yes", "No")
+  ) %>% 
+  ## create mortality time in years
+  mutate(time = time/12) 
+data2$CHD <- droplevels(data2$CHD)
+
+# Distribution of survival times
+ggplot(data2, aes(x = time, fill = as.factor(event))) +
+  geom_histogram(bins = 20, position = "identity", alpha = 0.75) +
+  labs(x = "Time (years)", y = "Count", fill = "Event") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+```{r data cleaning}
+# define s_grid (length P)
+# s_grid <- seq(1/60, 24, length = 1440)
+s_grid <- seq(0, 1, len = 1440)
+
+# survival outcome
+time <- data2$time
+status <- data2$event
+
+# cluster id
+cluster_id <- data2$STRAPSU
+
+# functional covariate
+X <- data2$MIMS
+
+# scalar covariates design matrix Z
+# Columns are: (Intercept), age_in_years, bmi
+Z <- model.matrix(~ age + gender + BMI + CHD, data = data2)
+# Z <- model.matrix(~ age, data = data2)
+```
+
+```{r effective rank}
+# numerical rank
+sv <- svd(X)$d
+# plot(sv / max(sv), log="y", type="b")
+tol <- max(dim(X)) * .Machine$double.eps * max(sv)
+rank <- sum(sv > tol)
+rank
+
+# entropy effective rank
+p <- sv / sum(sv)
+rank_eff <- exp(-sum(p * log(p)))
+rank_eff
+```
+
+```{r}
+ggplot(data2, aes(x = as.factor(SDMVSTRA), y = PIR)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) +
+  labs(title = "Variation of Variable across STRAPSU Clusters")
+
+# Calculate means for continuous covariates by STRAPSU
+cluster_means <- data2 %>%
+  group_by(STRAPSU) %>%
+  summarize(across(c(age, BMI, PIR), \(x) mean(x, na.rm = TRUE)))
+
+# Look for high variance between rows
+summary(cluster_means)
+
+# Note: Plotting ALL STRAPSUs will be messy, let's pick the first 5 to see
+library(survminer)
+sample_strapsu <- head(unique(data2$STRAPSU), 10)
+km_fit <- survfit(Surv(time, event) ~ STRAPSU, 
+                  data = filter(data2, STRAPSU %in% sample_strapsu))
+
+ggsurvplot(km_fit, data = filter(data2, STRAPSU %in% sample_strapsu), title = "KM curves by 10 selected strata")
+
+plot_data <- data %>%
+  filter(!is.na(education), !is.na(SDMVSTRA)) %>%
+  mutate(SDMVSTRA = factor(SDMVSTRA))
+
+# 2. Create a stacked proportional bar chart
+ggplot(plot_data, aes(x = SDMVSTRA, fill = education)) +
+  geom_bar(position = "fill") + # "fill" makes it a percentage/proportional chart
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, size = 8)) +
+  labs(
+    title = "Distribution of Education by Stratum",
+    x = "Stratum ID",
+    y = "Percentage of Participants",
+    fill = "Education Level"
+  )
+
+# 1. Prepare the data for plotting
+plot_data_cont <- data2 %>%
+  dplyr::select(SDMVSTRA, age, BMI, PIR) %>%
+  mutate(SDMVSTRA = factor(SDMVSTRA)) %>%
+  # Convert to long format for easier faceting
+  pivot_longer(cols = c(age, BMI, PIR), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value))
+
+# 2. Create the faceted boxplot
+ggplot(plot_data_cont, aes(x = SDMVSTRA, y = value, fill = variable)) +
+  geom_boxplot(outlier.size = 0.5, alpha = 0.7) +
+  facet_wrap(~variable, scales = "free_y", ncol = 1) + # Each variable gets its own Y-axis
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, size = 7),
+    legend.position = "none"
+  ) +
+  labs(
+    title = "Distribution of Age, BMI, and PIR by Stratum",
+    x = "Stratum ID",
+    y = "Value"
+  )
+```
+
+
+```{r gibbs sampler}
+### run Gibbs sampler
+fit_bayes <- gibbs_functional_frailty(
+  time = time,
+  status = status,
+  cluster_id = cluster_id,
+  Z = Z,
+  X = X,
+  s_grid = s_grid,
+  # tuning / priors
+  K = 20,
+  basis_type = "cc",
+  lambda_init = 5000,         
+  A_lambda = 1, B_lambda = 0.001, 
+  var_gamma = 100,
+  A_tau2 = 3, B_tau2 = 2,
+  A_sigma2 = 3, B_sigma2 = 2,
+  # MCMC
+  n_iter = 20000,
+  n_burn = 10000,
+  n_thin = 1,
+  verbose = TRUE
+)
+
+```
+
+```{r posterior summaries}
+# gamma
+print(apply(fit_bayes$gamma, 2, quantile, probs = c(0.025, 0.5, 0.975)))
+
+# sigma^2, tau^2
+quantile(fit_bayes$sigma2, c(0.025, 0.5, 0.975))
+quantile(fit_bayes$tau2,   c(0.025, 0.5, 0.975))
+hist(colMeans(fit_bayes$u))
+
+# Mean integrated width
+mean(fit_bayes$beta_q975 - fit_bayes$beta_q025)
+
+# Posterior summaries for the assessment-specific coefficient functions
+y_all <- c(
+  fit_bayes$beta_mean,
+  fit_bayes$beta_q025,
+  fit_bayes$beta_q975
+)
+
+ylim <- range(y_all)
+pad  <- 0.1 * diff(ylim)
+ylim <- ylim + c(-pad, pad)
+
+xinx <- (c(1,6,12,18,23)*60+1)/1440
+xinx_lab <- c("01:00","06:00","12:00","18:00","23:00")
+plot(x = s_grid, y = fit_bayes$beta_mean, type="l", xlab="Time of Day", ylab=expression(hat(beta)(s)), 
+     main="Estimate from Gibbs sampler",
+     xaxt='n', ylim = ylim, lwd = 2)
+lines(x = s_grid, y = fit_bayes$beta_q025, lty = 2)
+lines(x = s_grid, y = fit_bayes$beta_q975, lty = 2)
+legend(
+  "topleft",
+  legend = c("Posterior mean", "95% CrI"),
+  lty = c(1, 2),
+  lwd = c(2, 1),
+  col = c("black", "black"),
+  bty = "n"
+)
+abline(h=0,col='red',lty=2)
+axis(1, at=xinx, labels=xinx_lab)
+
+# Prediction
+test_X <- matrix(X[1, ], nrow = 1)
+test_Z <- matrix(Z[1, ], nrow = 1)
+preds <- predict_gibbs_frailty(fit, test_X, test_Z, type = "survival", times = c(1, 5))
+preds <- predict_gibbs_frailty(fit, test_X, test_Z, type = "response")
+```
+
+```{r lfAFT}
+fit_laft <- fit_lfAFT(data = data2, y = "time", delta = "event", x = "MIMS", x_as_regex = FALSE,
+                      z = c("age", "BMI", "gender", "CHD"),
+                      family = "lognormal", k = 20, basis = "cc", s_grid = s_grid, se = TRUE, bootstrap = TRUE)
+
+plot(fit_laft$s_grid, fit_laft$betaX_hat, type = "l", xlab = "s", ylab = "Estimated beta(s)")
+
+# Mean integrated width
+mean(fit_laft$betaX_boot_ci_upper - fit_laft$betaX_boot_ci_lower)
+```
+
+
+```{r refund}
+nS <- ncol(data2$MIMS) # dimension of the functional predictor
+svec <- seq(0, 1, len = nS) # observed points on the functional domain
+fit_lfcm_pfr <- refund::pfr(time ~ age + BMI + gender + CHD + 
+                       lf(MIMS, bs="cc",k=20,argvals=svec), 
+               method="REML", data=data2,weights=data2$event,
+               family=cox.ph)
+```
+
+```{r lfcm}
+N <- nrow(data2) # number of samples
+#Quadrature weights for Riemann integration
+lvec <- matrix(1 / 1440, 1440, 1)
+# matrix containing quadrature weights for all participants
+L <- kronecker(matrix(1, N, 1),t(lvec))
+# matrix containing functional domain values
+S <- kronecker(matrix(1, N, 1), t(s_grid))
+data2$S <- I(S)
+#Pointwise product of w i(s) and the quadrature weights, "L"
+data2$W_L <- I(data2$MIMS * L)
+
+fit_lfcm_mgcv <- gam(time ~ age + BMI + gender + CHD + 
+                       s(S, by=W_L, bs="cc",k=20), method="REML", 
+                data=data2, weights=data2$event,
+               family=cox.ph)
+summary(fit_lfcm_mgcv)
+gam.vcomp(fit_lfcm_mgcv)
+
+xinx <- (c(1,6,12,18,23)*60+1)/1440
+xinx_lab <- c("01:00","06:00","12:00","18:00","23:00")
+plot(fit_lfcm_mgcv, rug=FALSE, shade=TRUE,xlab="Time of Day", ylab=expression(hat(beta)(s)), main="Estimate from mgcv::gam()",
+     xaxt='n', lwd = 1.5)
+abline(h=0,col='red',lty=2)
+axis(1, at=xinx, labels=xinx_lab)
+
+### Check PH assumption ###
+# 1. Extract the design matrix (linear predictor matrix) from the fitted GAM
+X_matrix <- predict(fit_lfcm_mgcv, type = "lpmatrix")
+
+# 2. Identify and extract the columns that correspond to your functional spline term
+# The exact name might vary slightly depending on your mgcv version, so grep is safest
+func_cols <- grep("^s\\(S\\)", colnames(X_matrix))
+X_func <- X_matrix[, func_cols]
+
+# 3. Fit a standard coxph model using the scalar covariates + the functional basis matrix
+# Note: Do not include the intercept column from X_matrix in a Cox model
+fit_coxph <- coxph(Surv(time, event) ~ age + BMI + gender + CHD + X_func, data = data2)
+
+# 4. Run the proportional hazards test
+ph_test <- cox.zph(fit_coxph)
+print(ph_test)
+
+# 5. Visualize the Schoenfeld residuals
+par(mfrow=c(2,2)) # Adjust layout based on the number of covariates
+plot(ph_test)
+
+
+### Method 2: The Native mgcv Approach (Time-Varying Effects) ###
+# Refit the model allowing the effect of 'age' to vary smoothly over time
+fit_ph_check <- gam(time ~ age + s(time, by=age) + BMI + gender + CHD + 
+                       s(S, by=W_L, bs="cc", k=20), 
+                    method="REML", 
+                    data=data2, weights=data2$event,
+                    family=cox.ph)
+
+summary(fit_ph_check)
+
+library(gratia)
+
+# 1. Define your functional domain grid
+# Ensure this matches the grid length you used for 'svec' (e.g., 1440 for minutes in a day)
+s_grid <- seq(0, 1, length.out = 1440) 
+
+# 2. Create a synthetic dataset
+# We set W_L = 1 to isolate the beta(s) curve.
+# The scalar covariates (age, BMI, etc.) require placeholder values, 
+# but they will be ignored because we are extracting only the specific smooth term.
+newdata_beta <- data.frame(
+  S      = s_grid,
+  W_L    = rep(1, length(s_grid)),
+  age    = mean(data2$age),             # Dummy value
+  BMI    = mean(data2$BMI),             # Dummy value
+  gender = data2$gender[1], # Dummy value (must match a valid factor level)
+  CHD    = data2$CHD[1]     # Dummy value
+)
+
+# 3. Predict ONLY the smooth term with standard errors
+# type = "terms" ensures we do not get the overall linear predictor or baseline hazard
+preds <- predict(fit_lfcm_mgcv, newdata = newdata_beta, type = "terms", se.fit = TRUE)
+
+# In mgcv, a smooth with a 'by' variable is named "s(smooth_var):by_var"
+term_name <- "s(S):W_L"
+
+# Extract the fitted curve and its standard errors
+beta_hat <- preds$fit[, term_name]
+beta_se  <- preds$se.fit[, term_name]
+
+# 4. Calculate the 95% Confidence Bounds
+z_val <- qnorm(0.975) # approx 1.96
+upper <- beta_hat + z_val * beta_se
+lower <- beta_hat - z_val * beta_se
+width <- upper - lower
+
+# 5. Calculate Mean Integrated Width (MIW) using Trapezoidal integration
+dt <- diff(s_grid)
+integral_width <- sum(dt * (width[-1] + width[-length(width)]) / 2)
+
+# Normalize by the total length of the domain to get the average
+domain_length <- max(s_grid) - min(s_grid)
+miw_lfcm <- integral_width / domain_length
+
+cat(sprintf("LFCM Mean Integrated Width (MIW): %.4f\n", miw_lfcm))
+```
+
+```{r lfcm-fr}
+X_mat <- matrix(X, ncol = 1440, byrow = FALSE)
+fit_lfcmfr <- fpcr(time = time, event = status, group = cluster_id, 
+                           X = X_mat, Z = Z[, -1], nb = 20, gp = s_grid)
+coxme::VarCorr(fit_lfcmfr$model)
+
+plot(fit_lfcmfr$bhat)
+
+pred_fit_lfcmfr <- fpcr_predict(fit_lfcmfr, time = time, event = status, group = cluster_id, 
+                           X = X_mat, Z = Z[, -1], nb = 20, gp = s_grid)
+
+```
+
+
+```{r Brier score}
+library(caret)
+library(survival)
+
+# 1. Initialization
+n_folds <- 10
+
+# Ensure tgrid is strictly positive for the Log-Normal AFT (start at 0.1, not 0)
+tgrid <- seq(0.1, 8, len = 100) 
+
+# ==========================================
+# DEFINE THE TWO FOLD SETTINGS
+# ==========================================
+set.seed(916)
+
+# --- Setting 1: Split by Cluster (STRAPSU) ---
+# All subjects in a given cluster will go to the same fold.
+unique_clusters <- unique(data2$STRAPSU)
+# Randomly assign each unique cluster to a fold from 1 to 10
+cluster_fold_assignments <- sample(rep(1:n_folds, length.out = length(unique_clusters)))
+names(cluster_fold_assignments) <- as.character(unique_clusters)
+# Map the cluster fold assignments back to the individual rows in data2
+fold_setting1 <- unname(cluster_fold_assignments[as.character(data2$STRAPSU)])
+
+# --- Setting 2: Split by Subject, Stratified by Cluster ---
+# Subjects are split individually, but cluster proportions are maintained across folds.
+# createFolds automatically stratifies when given a factor.
+fold_setting2 <- caret::createFolds(as.factor(data2$STRAPSU), k = n_folds, list = FALSE)
+
+# Group the settings into a list to loop through
+cv_settings <- list(
+  "Setting 1: Split whole dataset by cluster (STRAPSU)" = fold_setting1,
+  "Setting 2: Split by individual subjects (Stratified by cluster)" = fold_setting2
+)
+
+# ==========================================
+# MAIN OUTER LOOP FOR CV SETTINGS
+# ==========================================
+
+for (setting_name in names(cv_settings)) {
+  cat(sprintf("\n\n********************************************************\n"))
+  cat(sprintf("STARTING CROSS-VALIDATION: %s\n", setting_name))
+  cat(sprintf("********************************************************\n"))
+  
+  # Get the fold assignments for the current setting
+  fold <- cv_settings[[setting_name]]
+  
+  # Storage for the Integrated Brier Score (IBS) and C-index for each fold
+  IBS_bayes  <- IBS_laft  <- IBS_lfcm  <- IBS_lfcmfr  <- rep(0, n_folds)
+  Cidx_bayes <- Cidx_laft <- Cidx_lfcm <- Cidx_lfcmfr <- rep(0, n_folds)
+  
+  for (i in 1:n_folds) {
+    cat(sprintf("\n--- Fold %d / %d ---\n", i, n_folds))
+    
+    # Split data
+    train_idx <- which(fold != i)
+    test_idx  <- which(fold == i)
+    
+    train_data <- data2[train_idx, ]
+    test_data  <- data2[test_idx, ]
+    
+    # ==========================================
+    # MODEL 1: Fit & Predict Bayesian lfAFT with frailty
+    # ==========================================
+    cat("Fitting lfAFT with frailty...\n")
+    
+    Z_train <- model.matrix(~ age + BMI + gender + CHD, data = train_data)
+    X_train <- as.matrix(train_data$MIMS)
+      
+    Z_test  <- model.matrix(~ age + BMI + gender + CHD, data = test_data)
+    X_test  <- as.matrix(test_data$MIMS)
+      
+    # Safely align columns (handles missing factor levels in the test fold)
+    missing_cols <- setdiff(colnames(Z_train), colnames(Z_test))
+      
+    if (length(missing_cols) > 0) {
+      for (col in missing_cols) {
+        Z_test <- cbind(Z_test, 0)               # Add column of zeros
+        colnames(Z_test)[ncol(Z_test)] <- col    # Name it correctly
+      }
+    }
+      
+    # Reorder Z_test to perfectly match Z_train and drop any strictly novel levels
+    Z_test <- Z_test[, colnames(Z_train), drop = FALSE]
+    
+    fit_bayes <- gibbs_functional_frailty( 
+      time       = train_data$time, 
+      status     = train_data$event, 
+      cluster_id = train_data$STRAPSU,
+      Z          = Z_train, 
+      X          = X_train, 
+      s_grid     = s_grid,
+      K          = 20,
+      basis_type = "cc",
+      n_iter     = 20000, 
+      n_burn     = 10000,
+      verbose    = FALSE 
+    )
+    
+    pred_bayes <- predict_gibbs_frailty(
+      fit            = fit_bayes,
+      X_new          = X_test,
+      Z_new          = Z_test,
+      cluster_id_new = test_data$STRAPSU,
+      type           = "survival",
+      times          = tgrid
+    )
+    
+    S_bayes <- pred_bayes$mean
+    
+    # ==========================================
+    # MODEL 2: Fit & Predict LFCM with frailty (fcoxFr)
+    # ==========================================
+    cat("Fitting LFCM with frailty...\n")
+    X_train_mat <- matrix(X_train, ncol = 1440, byrow = FALSE)
+    X_test_mat <- matrix(X_test, ncol = 1440, byrow = FALSE)
+    fit_lfcmfr <- fpcr(time = train_data$time, event = train_data$event, group = train_data$STRAPSU,
+                               X = X_train_mat, Z = Z_train[, -1], nb = 20, gp = s_grid)
+    
+    # Linear predictor for the train set
+    pred_lfcmfr_train <- fpcr_predict(object = fit_lfcmfr, time = train_data$time, event = train_data$event,
+                                      group = train_data$STRAPSU, X = X_train_mat, Z = Z_train[, -1])
+    eta_train <- pred_lfcmfr_train$predictions
+    
+    # Linear predictor for the test set
+    pred_lfcmfr_test <- fpcr_predict(object = fit_lfcmfr, time = test_data$time, event = test_data$event,
+                                     group = test_data$STRAPSU, X = X_test_mat, Z = Z_test[, -1])
+    eta_test <- pred_lfcmfr_test$predictions
+    
+    # Survival probability matrix
+    S_lfcmfr <- get_breslow_survival(
+      eta_train   = eta_train, 
+      time_train  = train_data$time, 
+      event_train = train_data$event, 
+      eta_test    = eta_test, 
+      tgrid       = tgrid
+    )
+    
+    # ==========================================
+    # MODEL 3: Fit & Predict lfAFT (funAFT)
+    # ==========================================
+    cat("Fitting lfAFT...\n")
+    fit_laft <- fit_lfAFT(data = train_data, y = "time", delta = "event", x = "MIMS", x_as_regex = FALSE,
+                          z = c("age", "BMI", "gender", "CHD"),
+                          family = "lognormal", k = 20, basis = "cc", s_grid = s_grid, se = FALSE)
+    
+    S_laft <- predict_lfAFT(fit_laft, test_data, type  = "survival", times = tgrid)
+    
+    # ==========================================
+    # MODEL 4: Fit & Predict LFCM (mgcv)
+    # ==========================================
+    cat("Fitting LFCM...\n")
+    
+    N <- nrow(train_data) # number of samples
+    # Quadrature weights for Riemann integration
+    lvec <- matrix(1 / 1440, 1440, 1)
+    # matrix containing quadrature weights for all participants
+    L <- kronecker(matrix(1, N, 1),t(lvec))
+    # matrix containing functional domain values
+    S <- kronecker(matrix(1, N, 1), t(s_grid))
+    train_data$S <- I(S)
+    #Pointwise product of w i(s) and the quadrature weights, "L"
+    train_data$W_L <- I(train_data$MIMS * L)
+  
+    fit_lfcm <- gam(time ~ age + BMI + gender + CHD + 
+                    s(S, by=W_L, bs="cc", k=20), 
+                    method="REML", 
+                    data=train_data, 
+                    weights=train_data$event, # Assuming 'event' is the status indicator
+                    family=cox.ph)
+    
+    N_test <- nrow(test_data) # number of test samples
+    # Quadrature weights for Riemann integration
+    L_test <- kronecker(matrix(1, N_test, 1),t(lvec))
+    # matrix containing functional domain values
+    S_test <- kronecker(matrix(1, N_test, 1), t(s_grid))
+    test_data$S <- I(S_test)
+    #Pointwise product of w i(s) and the quadrature weights, "L"
+    test_data$W_L <- I(test_data$MIMS * L_test)
+    
+    # mgcv::cox.ph evaluates survival probability based on the 'time' column in newdata.
+    # We loop over tgrid to build an (N_test x length(tgrid)) survival matrix.
+    S_lfcm <- matrix(NA, nrow = nrow(test_data), ncol = length(tgrid))
+    
+    for(j in seq_along(tgrid)) {
+      tmp_test <- test_data
+      tmp_test$time <- tgrid[j] 
+      S_lfcm[, j] <- predict(fit_lfcm, newdata = tmp_test, type = "response")
+    }
+    
+    # ==========================================
+    # METRICS: Calculate IPCW IBS and IPCW C-Index
+    # ==========================================
+    cat("Calculating IPCW Brier Scores and IPCW C-Index...\n")
+    
+    # --- 1. IPCW Integrated Brier Scores ---
+    IBS_bayes[i]  <- cal_IPCW_Brier(S_mat = S_bayes, time_test = test_data$time, event_test = test_data$event, 
+                                    time_train = train_data$time, event_train = train_data$event, tgrid = tgrid)
+    IBS_lfcmfr[i] <- cal_IPCW_Brier(S_mat = S_lfcmfr, time_test = test_data$time, event_test = test_data$event, 
+                                    time_train = train_data$time, event_train = train_data$event, tgrid = tgrid)
+    IBS_laft[i]   <- cal_IPCW_Brier(S_mat = S_laft, time_test = test_data$time, event_test = test_data$event, 
+                                    time_train = train_data$time, event_train = train_data$event, tgrid = tgrid)
+    IBS_lfcm[i]   <- cal_IPCW_Brier(S_mat = S_lfcm, time_test = test_data$time, event_test = test_data$event, 
+                                    time_train = train_data$time, event_train = train_data$event, tgrid = tgrid)
+    
+    # --- 2. Extracting Risk Scores ---
+    risk_bayes  <- -rowSums(S_bayes)
+    risk_lfcmfr <- eta_test
+    risk_laft   <- -predict_lfAFT(fit_laft, test_data, type = "link")
+    risk_lfcm   <- predict(fit_lfcm, newdata = test_data, type = "link")
+    
+    # --- 3. Uno's IPCW C-Index Calculation ---
+    Surv_train <- Surv(train_data$time, train_data$event)
+    Surv_test  <- Surv(test_data$time, test_data$event)
+    
+    Cidx_bayes[i]  <- UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_test, lpnew = risk_bayes)
+    Cidx_lfcmfr[i] <- UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_test, lpnew = risk_lfcmfr)
+    Cidx_laft[i]   <- UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_test, lpnew = risk_laft)
+    Cidx_lfcm[i]   <- UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_test, lpnew = risk_lfcm)
+    
+  }
+  
+  # ==========================================
+  # FINAL RESULTS FOR CURRENT SETTING
+  # ==========================================
+  cat(sprintf("\n=== 10-Fold CV Results for %s (IPCW Integrated Brier Score) ===\n", setting_name))
+  cat(sprintf("Mean lfAFT-fr IBS : %.4f (SD: %.4f)\n", mean(IBS_bayes, na.rm = TRUE), sd(IBS_bayes, na.rm = TRUE)))
+  cat(sprintf("Mean LFCM-fr IBS  : %.4f (SD: %.4f)\n", mean(IBS_lfcmfr, na.rm = TRUE), sd(IBS_lfcmfr, na.rm = TRUE)))
+  cat(sprintf("Mean lfAFT IBS    : %.4f (SD: %.4f)\n", mean(IBS_laft, na.rm = TRUE), sd(IBS_laft, na.rm = TRUE)))
+  cat(sprintf("Mean LFCM IBS     : %.4f (SD: %.4f)\n", mean(IBS_lfcm, na.rm = TRUE), sd(IBS_lfcm, na.rm = TRUE)))
+  
+  cat(sprintf("\n=== 10-Fold CV Results for %s (Uno's IPCW C-index) ===\n", setting_name))
+  cat(sprintf("Mean lfAFT-fr C-idx : %.4f (SD: %.4f)\n", mean(Cidx_bayes, na.rm = TRUE), sd(Cidx_bayes, na.rm = TRUE)))
+  cat(sprintf("Mean LFCM-fr C-idx  : %.4f (SD: %.4f)\n", mean(Cidx_lfcmfr, na.rm = TRUE), sd(Cidx_lfcmfr, na.rm = TRUE)))
+  cat(sprintf("Mean lfAFT C-idx    : %.4f (SD: %.4f)\n", mean(Cidx_laft, na.rm = TRUE), sd(Cidx_laft, na.rm = TRUE)))
+  cat(sprintf("Mean LFCM C-idx     : %.4f (SD: %.4f)\n", mean(Cidx_lfcm, na.rm = TRUE), sd(Cidx_lfcm, na.rm = TRUE)))
+}
+```

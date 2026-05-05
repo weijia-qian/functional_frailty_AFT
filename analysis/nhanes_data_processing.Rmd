@@ -1,0 +1,36 @@
+---
+title: "nhanes_data_processing"
+author: "Weijia Qian"
+date: "2026-03-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(foreign)
+library(dplyr)
+```
+
+```{r}
+demo_2011 <- read.xport(here("data", "nhanes_demo_2011.xpt"))
+demo_2013 <- read.xport(here("data", "nhanes_demo_2013.xpt"))
+nhanes_fda <- readRDS(here("data", "nhanes_fda_with_r.rds"))
+
+demo_combined <- bind_rows(demo_2011, demo_2013) %>%
+  dplyr::select(SEQN, SDDSRVYR, WTINT2YR, WTMEC2YR, SDMVPSU, SDMVSTRA)
+
+nhanes_final <- nhanes_fda %>%
+  left_join(demo_combined, by = "SEQN") %>%
+  mutate(STRAPSU = paste(SDMVSTRA, SDMVPSU, sep = "_"))
+
+strapsu_summary <- nhanes_final %>%
+  group_by(STRAPSU) %>%
+  summarize(unique_participants = n_distinct(SEQN))
+
+# View the result
+hist(strapsu_summary$unique_participants, main = "Histogram of unique participants per PSU")
+summary(strapsu_summary$unique_participants)
+
+saveRDS(nhanes_final, file = here("data", "nhanes_with_demo.rds"))
+```
+
