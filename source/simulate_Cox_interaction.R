@@ -1,32 +1,28 @@
 # =============================================================================
-# simulate_AFT_interaction.R
+# simulate_Cox_interaction.R
 #
-# Simulate survival data from a lognormal, log-logistic, or Weibull AFT model
-# whose true functional effect is a BIVARIATE coefficient surface beta(s, a).
+# Simulate survival data from a functional Cox model with shared Gaussian
+# frailty and a bivariate coefficient surface beta(s, a), where
+#   s in [0, 1]  -- the functional domain (e.g. time-of-day for MIMS)
+#   a in [0, 1]  -- age scaled to the unit interval
 #
-# All three families share the same linear predictor structure:
+# True hazard model for subject i in cluster j:
 #
-#   log T_ij = gamma[1] + gamma[2]*Z1_ij + gamma[3]*Z2_ij
-#              + integral_0^1 X_ij(s) * beta(s, a_ij) ds
-#              + u_j  +  sigma * epsilon_ij
+#   h(t_ij | u_j) = h_0(t) * exp( gamma[1] + gamma[2]*Z1_ij + gamma[3]*Z2_ij
+#                                  + integral_0^1 X_ij(s) * beta(s, a_ij) ds
+#                                  + u_j )
 #
-# Error distributions:
-#   "lognormal"   : epsilon ~ N(0, 1)
-#   "loglogistic" : epsilon ~ Logistic(0, 1)
-#   "weibull"     : epsilon ~ Gumbel_min(0, 1),  simulated as log(Exp(1))
-#                   Equivalent to T | LP ~ Weibull(shape = 1/sigma,
-#                   scale = exp(LP + u_j)).  The ONLY AFT family that is
-#                   also a proportional hazards model (with beta_PH = beta_AFT/sigma).
+# where u_j ~ N(0, tau^2) is the shared log-hazard frailty.
+# Baseline hazard: Weibull h_0(t) = lambda_0 * rho * t^{rho-1} (rho=1: exponential).
+# Survival times via inverse-CDF: T_ij = (E_ij / (lambda_0*exp(LP_ij)))^{1/rho},
+# E_ij ~ Exp(1).
 #
-# Cluster design
+# Cluster design  (identical to simulate_AFT_interaction.R)
 # --------------
-# Total sample size N_total is fixed exactly. Cluster sizes n_j are drawn
-# independently from Uniform(nj_min, nj_max), rounded, last cluster adjusted
-# so sum(n_j) = N_total. The bounds are set symmetrically around the mean:
-#
+# N_total is fixed exactly. Cluster sizes n_j ~ Uniform(nj_min, nj_max),
+# rounded, last cluster adjusted so sum(n_j) = N_total.
 #   nj_min = floor( mean_nj * (1 - range_factor) )
-#   nj_max = ceil(  mean_nj * (1 + range_factor) )
-#   mean_nj = N_total / n_cluster
+#   nj_max = ceil(  mean_nj * (1 + range_factor) ),  mean_nj = N_total/n_cluster
 #
 # With the default range_factor = 0.5 (±50% of mean):
 #   J=25, N=4000 -> Uniform( 80, 240),  mean=160
@@ -39,9 +35,7 @@
 #   "bilinear"  -- beta(s,a) = 2*s*a             (pure interaction)
 #   "ridge"     -- beta(s,a) = exp(-6*(s-a)^2)   (diagonal ridge, non-separable)
 # =============================================================================
-
-simulate_AFT_interaction <- function(
-    family           = c("lognormal", "loglogistic", "weibull"),
+simulate_Cox_interaction <- function(
     N_total          = 4000,      # exact total sample size
     n_cluster        = 50,        # number of clusters J
     range_factor     = 0.5,       # half-width of Uniform cluster sizes as a
@@ -53,12 +47,12 @@ simulate_AFT_interaction <- function(
     beta_type        = c("additive", "bilinear", "ridge"),
     age_range        = c(40, 85), # raw age ~ Uniform(age_range[1], age_range[2])
     gamma            = c(0.5, 0.3, -0.2), # c(intercept, Z1, Z2)
-    sigma            = 0.2,       # AFT error SD
+    lambda_0         = 0.1,       # Weibull baseline rate
+    rho              = 1.5,       # Weibull shape (rho=1: exponential)
     tau              = 0.5,       # frailty SD: u_j ~ N(0, tau^2)
     censor_rate      = 0.25       # target censoring proportion (0 = none)
 ) {
   
-  family       <- match.arg(family)
   beta_type <- match.arg(beta_type)
   
   # ---------------------------------------------------------------------------
@@ -117,17 +111,17 @@ simulate_AFT_interaction <- function(
     Phi_fourier[, 2*k + 1] <- sqrt(2) * sin(2*pi*k*s_grid)
   }
   
-  lambda_decay <- (seq_len(k0))^(-alpha)         # eigenvalue decay
-  Xi           <- matrix(rnorm(N * k0), N, k0)   # random scores
+  lambda_decay <- (seq_len(k0))^(-alpha)          # eigenvalue decay
+  Xi           <- matrix(rnorm(N * k0), N, k0)    # random scores
   sim_curves   <- Xi %*% diag(sqrt(lambda_decay)) %*% t(Phi_fourier)  # N x nS
   
   # ---------------------------------------------------------------------------
-  # 4.  True bivariate coefficient surface  beta(s, a)
+  # 4.  True bivariate coefficient surface beta(s, a)
   #
-  #  Both surfaces use:
-  #    s in [0, 1]  (normalised functional domain)
-  #    a in [0, 1]  (normalised age)
-  #  and are >= 0 everywhere by construction.
+  #   s in [0, 1] -- normalised functional domain
+  #   a in [0, 1] -- normalised age
+  #   All surfaces are >= 0 everywhere and contain no additive constant,
+  #   so absorb.cons in the fitting function does not remove signal.
   # ---------------------------------------------------------------------------
   
   if (beta_type == "additive") {
@@ -135,13 +129,13 @@ simulate_AFT_interaction <- function(
     # ------------------------------------------------------------------
     # Surface 1: additive plane  beta(s, a) = s + a
     #
-    #   Separable, no interaction. The effect of s does not depend on a
-    #   and vice versa. Lies exactly in the span of the marginal basis
-    #   functions -- the easiest case for the tensor model.
+    #   Separable, no interaction. The s and a effects are independent.
+    #   Lies exactly in the span of the marginal basis functions --
+    #   the easiest case for the tensor smooth to represent.
     #
-    #   beta(s, a) = beta(a, s)  [symmetric in s and a]
-    #   Range : [0, 2].  Zero only at the corner (s=0, a=0).
-    #   Domain mean : E[s] + E[a] = 0.5 + 0.5 = 1.
+    #   Symmetric: beta(s,a) = beta(a,s)
+    #   Range: [0, 2].  Zero only at the corner (s=0, a=0).
+    #   Domain mean: E[s] + E[a] = 1.
     # ------------------------------------------------------------------
     beta_fn <- function(s, a) s + a
     
@@ -150,13 +144,12 @@ simulate_AFT_interaction <- function(
     # ------------------------------------------------------------------
     # Surface 2: bilinear interaction  beta(s, a) = 2*s*a
     #
-    #   Non-separable multiplicative interaction: the surface is large
-    #   only when BOTH s and a are large, and zero along both axes.
-    #   Requires the cross-product tensor basis functions to represent.
+    #   Non-zero only when BOTH s and a are large. Requires cross-product
+    #   tensor basis functions; cannot be represented by marginals alone.
     #
-    #   beta(s, a) = beta(a, s)  [symmetric in s and a]
-    #   Range : [0, 2].  Zero along s=0 or a=0.
-    #   Domain mean : 2 * E[s] * E[a] = 0.5.
+    #   Symmetric: beta(s,a) = beta(a,s)
+    #   Range: [0, 2].  Zero along s=0 or a=0.
+    #   Domain mean: 2*E[s]*E[a] = 0.5.
     # ------------------------------------------------------------------
     beta_fn <- function(s, a) 2 * s * a
     
@@ -165,64 +158,59 @@ simulate_AFT_interaction <- function(
     # ------------------------------------------------------------------
     # Surface 3: Gaussian diagonal ridge  beta(s, a) = exp(-6*(s-a)^2)
     #
-    #   The surface is concentrated along the main diagonal s = a, where
-    #   beta = 1, and decays rapidly away from it (half-max at |s-a|=0.34).
-    #   Unlike additive and bilinear, this surface is high at BOTH corners
-    #   (0,0) and (1,1) and low at the off-diagonal corners (1,0) and (0,1).
-    #   It is genuinely non-separable: no f(s)*g(a) factorisation exists.
+    #   Large along the main diagonal s = a; decays rapidly off-diagonal.
+    #   Genuinely non-separable: no f(s)*g(a) factorisation exists.
     #
-    #   beta(s, a) = beta(a, s)  [symmetric in s and a, exact]
-    #   Range : [exp(-6), 1] ≈ [0.002, 1].  Strictly positive everywhere.
-    #   Domain mean : ~0.56  (from Monte Carlo).
+    #   Symmetric: beta(s,a) = beta(a,s)  [exact]
+    #   Range: [exp(-6), 1] ~= [0.002, 1].  Strictly positive everywhere.
+    #   Domain mean: ~0.56.
     # ------------------------------------------------------------------
     beta_fn <- function(s, a) exp(-6 * (s - a)^2)
     
   }
   
   # ---------------------------------------------------------------------------
-  # 5.  Numerical integration:  int_i = sum_s X_i(s) * beta(s, a_i) * w(s)
+  # 5.  Numerical integration:  num_int_i = sum_s X_i(s) * beta(s, a_i) * w(s)
   #
-  #  Because beta depends on the individual's age, the surface must be
-  #  evaluated separately for each subject i.
+  #   Because beta depends on each subject's age, the surface is evaluated
+  #   separately for each i.
   # ---------------------------------------------------------------------------
-  wts     <- trapz_weights(s_grid)   # trapezoidal quadrature weights, length nS
+  wts     <- trapz_weights(s_grid)
   num_int <- numeric(N)
   
   for (i in seq_len(N)) {
-    beta_i   <- beta_fn(s_grid, age_scaled[i])    # evaluate surface at age_i
+    beta_i     <- beta_fn(s_grid, age_scaled[i])
     num_int[i] <- sum(sim_curves[i, ] * beta_i * wts)
   }
   
   # ---------------------------------------------------------------------------
-  # 6.  Error term epsilon ~ F_epsilon (standardised, mean 0)
-  #
-  #   lognormal  : N(0,1)           -- symmetric, light tails
-  #   loglogistic: Logistic(0,1)    -- symmetric, heavier tails
-  #   weibull    : Gumbel_min(0,1)  -- skewed left; log(Exp(1)) is exact draw
-  #                The Weibull AFT model is uniquely also a PH model:
-  #                h(t) = (1/sigma) * lambda_0^{1/sigma} * t^{1/sigma - 1} * exp(LP/sigma)
-  #                where lambda_0 = 1 and Weibull shape rho = 1/sigma.
+  # 6.  Shared cluster frailty  u_j ~ N(0, tau^2)  on the log-hazard scale
   # ---------------------------------------------------------------------------
-  z_err <- switch(family,
-                  lognormal   = rnorm(N),
-                  loglogistic = stats::rlogis(N),
-                  weibull     = log(rexp(N))   # log(Exp(1)) ~ Gumbel_min(0,1)
-  )
-  
-  # ---------------------------------------------------------------------------
-  # 7.  Shared cluster frailty
-  # ---------------------------------------------------------------------------
-  u_j    <- rnorm(n_cluster, mean = 0, sd = tau)
+  u_j     <- rnorm(n_cluster, mean = 0, sd = tau)
   frailty <- u_j[cluster_id]
   
   # ---------------------------------------------------------------------------
-  # 8.  Linear predictor and true survival times
+  # 7.  Log-hazard linear predictor (same for all t; h_0 carries the time dep.)
   # ---------------------------------------------------------------------------
-  lp     <- gamma[1] + gamma[2]*z1 + gamma[3]*z2 + num_int
-  T_true <- exp(lp + frailty + sigma * z_err)
+  lp <- gamma[1] + gamma[2]*z1 + gamma[3]*z2 + num_int + frailty
+  # lp = log{ h(t) / h_0(t) }  for each subject
   
   # ---------------------------------------------------------------------------
-  # 9.  Censoring via Uniform(0, ub) where ub is chosen to hit censor_rate
+  # 8.  Survival times via Weibull inverse-CDF
+  #
+  #   h(t) = lambda_0 * rho * t^{rho-1} * exp(lp)
+  #   H(t) = lambda_0 * t^rho * exp(lp)
+  #   S(t) = exp(-H(t))
+  #
+  #   Inverse CDF:  T = [ -log(U) / (lambda_0 * exp(lp)) ]^{1/rho}
+  #                   = [ E / (lambda_0 * exp(lp)) ]^{1/rho}
+  #   where E ~ Exp(1) = -log(Uniform(0,1)).
+  # ---------------------------------------------------------------------------
+  E      <- rexp(N, rate = 1)
+  T_true <- (E / (lambda_0 * exp(lp)))^(1 / rho)
+  
+  # ---------------------------------------------------------------------------
+  # 9.  Censoring via Uniform(0, ub) calibrated to hit censor_rate
   # ---------------------------------------------------------------------------
   if (censor_rate > 0) {
     ub <- choose_ub_unif(T_true, censor_rate)
@@ -236,10 +224,8 @@ simulate_AFT_interaction <- function(
   # ---------------------------------------------------------------------------
   # 10.  Data frame for model fitting
   #
-  #  Note: W (the integrated tensor basis matrix) is NOT precomputed here
-  #  because it is subject-specific in the interaction model; gibbs_frailty_
-  #  interaction() constructs it internally using PredictMat().
-  #  Pass sim_data$X and sim_data$age directly to that function.
+  #   The integrated tensor basis W is NOT precomputed here because it is
+  #   subject-specific. Pass X and age to the fitting function directly.
   # ---------------------------------------------------------------------------
   sim_data <- data.frame(
     subject_id = seq_len(N),
@@ -249,27 +235,24 @@ simulate_AFT_interaction <- function(
     X          = I(sim_curves),   # N x nS functional predictor matrix
     Z1         = z1,
     Z2         = z2,
-    age        = age_raw,         # raw age (pass to gibbs_frailty_interaction)
-    age_scaled = age_scaled,      # a in [0,1]  (used for DGM / diagnostics)
+    age        = age_raw,         # raw age (for the fitting function)
+    age_scaled = age_scaled,      # a in [0,1]  (for DGM evaluation)
     T_true     = T_true,
-    lp         = lp
+    lp         = lp               # log-hazard ratio (excludes h_0)
   )
   
   # ---------------------------------------------------------------------------
-  # 11.  True surface on a plotting grid  (nS x n_age_eval)
-  #
-  #  beta_surface$beta  -- vectorised values of beta(s, a)
-  #  beta_surface_mat   -- matrix form (nS rows = s, n_age_eval cols = age)
+  # 11.  True surface on a plotting grid  (nS x 51)
   # ---------------------------------------------------------------------------
   a_eval   <- seq(0, 1, length.out = 51)
   age_eval <- a_eval * diff(age_range) + age_range[1]
   
-  beta_surface_mat <- outer(s_grid, a_eval, FUN = beta_fn)  # nS x 51
+  beta_surface_mat <- outer(s_grid, a_eval, FUN = beta_fn)   # nS x 51
   
   beta_surface <- data.frame(
-    s          = rep(s_grid,  times = length(a_eval)),
-    age_scaled = rep(a_eval,  each  = nS),
-    age        = rep(age_eval, each = nS),
+    s          = rep(s_grid,   times = length(a_eval)),
+    age_scaled = rep(a_eval,   each  = nS),
+    age        = rep(age_eval, each  = nS),
     beta       = as.vector(beta_surface_mat)
   )
   
@@ -278,17 +261,17 @@ simulate_AFT_interaction <- function(
   # ---------------------------------------------------------------------------
   list(
     data             = sim_data,
-    beta_fn          = beta_fn,         # closure: beta_fn(s, a) for any s, a
-    beta_surface     = beta_surface,    # long data frame for ggplot
-    beta_surface_mat = beta_surface_mat,# nS x 51 matrix form
+    beta_fn          = beta_fn,          # closure: beta_fn(s, a) for any s, a
+    beta_surface     = beta_surface,     # long data frame for ggplot
+    beta_surface_mat = beta_surface_mat, # nS x 51 matrix
     s_grid           = s_grid,
-    beta_type     = beta_type,
-    family           = family,
+    beta_type        = beta_type,
+    dgm              = "cox",
     age_range        = age_range,
     gamma            = gamma,
-    sigma            = sigma,
+    lambda_0         = lambda_0,
+    rho              = rho,
     tau              = tau,
-    weibull_shape    = if (family == "weibull") 1 / sigma else NA_real_,
     u                = u_j,
     n_subjects       = nj           # integer vector of realized cluster sizes
   )

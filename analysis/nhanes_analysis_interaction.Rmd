@@ -42,11 +42,21 @@ data2 <- data %>%
                          breaks = seq(min(age, na.rm = TRUE), max(age, na.rm = TRUE) + 5, by = 10),
                          right = FALSE),
          MIMS_group = cut(TMIMS,
-                          breaks = quantile(TMIMS, c(0, 0.333, 0.667, 1)), 
+                          breaks = quantile(TMIMS, c(0, 0.333, 0.667, 1)),
                           labels = c("low TMIMS", "medium TMIMS", "high TMIMS"),
                           include.lowest = TRUE))
 data2$CHD <- droplevels(data2$CHD)
-# 
+
+# Fit a regular Cox model and check PH assumption
+fit_regular_cox <- coxph(Surv(time, event) ~ age_group + gender + BMI + CHD + MIMS_group, 
+                         data = data2)
+
+summary(fit_regular_cox)
+
+ph_test <- cox.zph(fit_regular_cox)
+print(ph_test)
+plot(ph_test)
+
 # # Kaplan-Meier model stratified by the new age groups
 # km_age_fit <- survfit(Surv(time, event) ~ age_group, data = data2)
 # 
@@ -82,6 +92,14 @@ ggsurvplot(
 )
 ```
 
+```{r}
+test <- data2 %>%
+  group_by(STRAPSU) %>%
+  summarise(n_unique_SEQN = n_distinct(SEQN))
+
+summary(test$n_unique_SEQN)
+```
+
 ```{r data cleaning}
 # define s_grid (length P)
 # s_grid <- seq(1/60, 24, length = 1440)
@@ -100,8 +118,8 @@ age <- data2$age
 
 # scalar covariates design matrix Z
 # Columns are: (Intercept), age_in_years, bmi
-Z <- model.matrix(~ age + gender + BMI + CHD, data = data2)
-# Z <- model.matrix(~ gender + BMI + CHD, data = data2)
+# Z <- model.matrix(~ age + gender + BMI + CHD, data = data2)
+Z <- model.matrix(~ gender + BMI + CHD, data = data2)
 ```
 
 
@@ -116,10 +134,10 @@ fit_bayes_int <- gibbs_frailty_interaction(
   age = age,
   s_grid = s_grid,
   # tuning / priors
-  K_s = 10,
-  K_age = 5,
+  K_s = 25,
+  K_age = 20,
   lambda_init = 5000,         
-  A_lambda = 1, B_lambda = 0.001, 
+  A_lambda = 1, B_lambda = 0.1, 
   var_gamma = 100,
   A_tau2 = 3, B_tau2 = 2,
   A_sigma2 = 3, B_sigma2 = 2,
@@ -130,6 +148,8 @@ fit_bayes_int <- gibbs_frailty_interaction(
   verbose = TRUE
 )
 
+
+# saveRDS(fit_bayes_int, file = "fit_bayes_int_k20.rds")
 ```
 
 ```{r posterior summaries}
@@ -144,7 +164,7 @@ hist(colMeans(fit_bayes_int$u))
 
 
 ```{r interaction surface}
-reconstruct_interaction_surface <- function(mcmc_out, grid_age = seq(50, 80, by = 0.5), grid_s = s_grid) {
+reconstruct_interaction_surface <- function(mcmc_out, grid_age = seq(50, 80, by = 1), grid_s = s_grid) {
   require(mgcv)
   
   meta <- mcmc_out$meta
@@ -180,7 +200,7 @@ plot_data <- plot_data %>%
   ))
 
 # Heatmap Visualization
-ggplot(plot_data, aes(x = s_grid, y = age)) +
+p <- ggplot(plot_data, aes(x = s_grid, y = age)) +
   # Main Heatmap
   geom_tile(aes(fill = beta_mean)) +
   # Add black contour lines with a mapped aesthetic for the legend
@@ -198,7 +218,7 @@ ggplot(plot_data, aes(x = s_grid, y = age)) +
   labs(
     x = "Time of day (s)",
     y = "Age (years)",
-    title = "K_s = 10, K_age = 8",
+    title = "K_s = 25, K_age = 20",
     fill = expression(beta(s, age))
   ) +
   theme_minimal() +
@@ -208,6 +228,11 @@ ggplot(plot_data, aes(x = s_grid, y = age)) +
     plot.title = element_text(face = "bold")
   ) 
 
+ggsave("beta_k25_k20.png", plot = p, width = 8, height = 6)
+```
+
+
+```{r interaction surface}
 library(plotly)
 library(tidyr)
 
@@ -230,7 +255,7 @@ plot_ly(x = ~s_grid_axis, y = ~age_axis, z = ~matrix_data) %>%
     colorbar = list(title = "beta(s, age)")
   ) %>%
   layout(
-    title = "K_s = 10, K_age = 10",
+    title = "K_s = 25, K_age = 20",
     scene = list(
       xaxis = list(title = "Time of Day (s)", ticktext = c('12 AM', '6 AM', '12 PM', '6 PM', '12 AM'), tickvals = seq(0, 1, 0.25)),
       yaxis = list(title = "Age (years)"),
@@ -302,7 +327,7 @@ new_data <- data2 %>%
     .groups = "drop" # Un-group the data after summarizing
   ) %>%
   mutate(BMI = 29)
-Z_new <- model.matrix(~ age + gender + BMI + CHD, data = new_data)
+Z_new <- model.matrix(~ gender + BMI + CHD, data = new_data)
 
 times = seq(0.1, 10, length = 50)
 pred_surv <- predict_gibbs_interaction(fit = fit_bayes_int, X_new = new_data$MIMS, age_new = new_data$age, Z_new = Z_new,
@@ -314,7 +339,7 @@ colnames(pred_df) <- paste0("t", times)
 surv_df <- new_data %>%
   mutate(id = row_number()) %>%
   bind_cols(pred_df) %>%   # ← THIS is essential
-  filter(gender == "Female" & CHD == "No") %>%
+  filter(gender == "Male" & CHD == "No") %>%
   pivot_longer(
     cols = starts_with("t"),
     names_to = "time",
@@ -352,7 +377,7 @@ ggplot(surv_df,
     x = "Time",
     y = "Survival Probability",
     color = "PA level",
-    title = "Female without CHD"
+    title = "Male without CHD"
   ) +
   theme_bw()
 ```
@@ -521,7 +546,7 @@ for (setting_name in names(cv_settings)) {
     train_data$W_L <- I(train_data$MIMS * L)
   
     fit_lfcm <- gam(time ~ age + BMI + gender + CHD + 
-                    s(S, by=W_L, bs="cc", k=1 0), 
+                    s(S, by=W_L, bs="cc", k=10), 
                     method="REML", 
                     data=train_data, 
                     weights=train_data$event, # Assuming 'event' is the status indicator
@@ -614,7 +639,7 @@ y_aft <- matrix(log(data2$time), N, 2)
 y_aft[, 2] <- y_aft[, 1]
 y_aft[data2$event == 0, 2] <- Inf
 data2$y_aft <- y_aft
-X <- as.matrix(data$)
+X <- as.matrix(data$MIMS)
 
 fit_mgcv <- gam(
   y_aft ~ age + BMI + gender + CHD +

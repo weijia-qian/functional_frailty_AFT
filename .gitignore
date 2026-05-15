@@ -20,5 +20,8 @@ drafts/*_cache/
 *html
 *png
 *pptx
+*rds
+*RData
+*rda
 
 sandbox/

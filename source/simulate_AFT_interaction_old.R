@@ -1,94 +1,53 @@
 # =============================================================================
 # simulate_AFT_interaction.R
 #
-# Simulate survival data from a lognormal, log-logistic, or Weibull AFT model
-# whose true functional effect is a BIVARIATE coefficient surface beta(s, a).
+# Simulate survival data from a lognormal (or log-logistic) AFT model whose
+# true functional effect is a BIVARIATE coefficient surface beta(s, a), where
+#   s in [0, 1]  -- the functional domain (e.g. time-of-day for MIMS)
+#   a in [0, 1]  -- age scaled to the unit interval
 #
-# All three families share the same linear predictor structure:
+# True linear predictor for subject i in cluster j:
 #
-#   log T_ij = gamma[1] + gamma[2]*Z1_ij + gamma[3]*Z2_ij
+#   log T_ij = gamma[1] + gamma[2]*z1_ij + gamma[3]*z2_ij
 #              + integral_0^1 X_ij(s) * beta(s, a_ij) ds
 #              + u_j  +  sigma * epsilon_ij
 #
-# Error distributions:
-#   "lognormal"   : epsilon ~ N(0, 1)
-#   "loglogistic" : epsilon ~ Logistic(0, 1)
-#   "weibull"     : epsilon ~ Gumbel_min(0, 1),  simulated as log(Exp(1))
-#                   Equivalent to T | LP ~ Weibull(shape = 1/sigma,
-#                   scale = exp(LP + u_j)).  The ONLY AFT family that is
-#                   also a proportional hazards model (with beta_PH = beta_AFT/sigma).
+# where u_j ~ N(0, tau^2) is the shared cluster frailty.
 #
-# Cluster design
-# --------------
-# Total sample size N_total is fixed exactly. Cluster sizes n_j are drawn
-# independently from Uniform(nj_min, nj_max), rounded, last cluster adjusted
-# so sum(n_j) = N_total. The bounds are set symmetrically around the mean:
+# Two surface types are implemented, both >= 0 everywhere and defined on the
+# scaled inputs (s in [0,1], a in [0,1]):
 #
-#   nj_min = floor( mean_nj * (1 - range_factor) )
-#   nj_max = ceil(  mean_nj * (1 + range_factor) )
-#   mean_nj = N_total / n_cluster
+#   "additive"  -- beta(s,a) = 1 + s + a   (tilted plane, no interaction term)
+#   "bilinear"  -- beta(s,a) = 1 + 2*s*a   (pure s x a interaction)
 #
-# With the default range_factor = 0.5 (±50% of mean):
-#   J=25, N=4000 -> Uniform( 80, 240),  mean=160
-#   J=50, N=4000 -> Uniform( 40, 120),  mean= 80
-#   J=75, N=4000 -> Uniform( 26,  80),  mean= 53
-#
-# Three coefficient surfaces, all >= 0 on [0,1]^2 (no additive constant):
-#
-#   "additive"  -- beta(s,a) = s + a             (separable plane)
-#   "bilinear"  -- beta(s,a) = 2*s*a             (pure interaction)
-#   "ridge"     -- beta(s,a) = exp(-6*(s-a)^2)   (diagonal ridge, non-separable)
+# Helper functions trapz_weights() and choose_ub_unif() are appended at the
+# bottom of this file.
 # =============================================================================
 
 simulate_AFT_interaction <- function(
-    family           = c("lognormal", "loglogistic", "weibull"),
-    N_total          = 4000,      # exact total sample size
-    n_cluster        = 50,        # number of clusters J
-    range_factor     = 0.5,       # half-width of Uniform cluster sizes as a
-    # fraction of the mean: Uniform(mean*(1-f), mean*(1+f))
-    tmax             = 1,         # right endpoint of functional domain
-    nS               = 401,       # grid points for s
-    k0               = 20,        # Fourier basis dimension for X(s)
-    alpha            = 0.7,       # eigenvalue decay: lambda_k = k^{-alpha}
-    beta_type        = c("additive", "bilinear", "ridge"),
-    age_range        = c(40, 85), # raw age ~ Uniform(age_range[1], age_range[2])
-    gamma            = c(0.5, 0.3, -0.2), # c(intercept, Z1, Z2)
-    sigma            = 0.2,       # AFT error SD
-    tau              = 0.5,       # frailty SD: u_j ~ N(0, tau^2)
-    censor_rate      = 0.25       # target censoring proportion (0 = none)
+    family       = c("lognormal", "loglogistic"),
+    n_cluster    = 100,
+    n_subject    = 5,
+    tmax         = 1,         # right endpoint of functional domain s in [0, tmax]
+    nS           = 401,       # number of grid points for s
+    k0           = 20,        # Fourier basis dimension for simulating X(s)
+    alpha        = 0.7,       # eigenvalue decay rate: lambda_k = k^{-alpha}
+    beta_type = c("additive", "bilinear", "ridge"),
+    age_range    = c(40, 85), # raw age drawn from Uniform(age_range[1], age_range[2])
+    gamma        = c(0.5, 0.3, -0.2), # c(intercept, z1 coef, z2 coef)
+    sigma        = 0.2,       # error SD
+    tau          = 0.5,       # frailty SD
+    censor_rate  = 0.25       # target censoring proportion (0 = no censoring)
 ) {
   
   family       <- match.arg(family)
   beta_type <- match.arg(beta_type)
   
   # ---------------------------------------------------------------------------
-  # 0.  Cluster sizes: n_j ~ Uniform(nj_min, nj_max), rounded to int,
-  #     last cluster adjusted so sum(n_j) = N_total exactly.
-  #
-  #   nj_min = floor( mean_nj * (1 - range_factor) )
-  #   nj_max = ceil(  mean_nj * (1 + range_factor) )
-  #
-  #   This keeps the distribution symmetric around mean_nj = N_total/n_cluster
-  #   and scales automatically with any (N_total, n_cluster) combination:
-  #     J=25, N=4000 -> mean=160, Uniform(80, 240)
-  #     J=50, N=4000 -> mean= 80, Uniform(40, 120)
-  #     J=75, N=4000 -> mean= 53, Uniform(26,  80)
+  # 0.  Dimensions and indexing
   # ---------------------------------------------------------------------------
-  mean_nj <- N_total / n_cluster
-  nj_min  <- max(1L, floor(mean_nj  * (1 - range_factor)))
-  nj_max  <- ceiling(mean_nj * (1 + range_factor))
-  
-  # Draw J-1 sizes; last cluster absorbs the remainder.
-  # Repeat until the remainder is also >= 1 (rare edge case when all J-1
-  # draws round up simultaneously and exhaust the budget).
-  repeat {
-    nj            <- pmax(1L, round(runif(n_cluster - 1L, nj_min, nj_max)))
-    nj[n_cluster] <- as.integer(N_total - sum(nj))
-    if (nj[n_cluster] >= 1L) break
-  }
-  
-  N          <- sum(nj)                  # == N_total
-  cluster_id <- rep(seq_len(n_cluster), times = nj)
+  N          <- n_cluster * n_subject
+  cluster_id <- rep(seq_len(n_cluster), each = n_subject)
   
   # ---------------------------------------------------------------------------
   # 1.  Scalar covariates
@@ -194,20 +153,9 @@ simulate_AFT_interaction <- function(
   }
   
   # ---------------------------------------------------------------------------
-  # 6.  Error term epsilon ~ F_epsilon (standardised, mean 0)
-  #
-  #   lognormal  : N(0,1)           -- symmetric, light tails
-  #   loglogistic: Logistic(0,1)    -- symmetric, heavier tails
-  #   weibull    : Gumbel_min(0,1)  -- skewed left; log(Exp(1)) is exact draw
-  #                The Weibull AFT model is uniquely also a PH model:
-  #                h(t) = (1/sigma) * lambda_0^{1/sigma} * t^{1/sigma - 1} * exp(LP/sigma)
-  #                where lambda_0 = 1 and Weibull shape rho = 1/sigma.
+  # 6.  Error term
   # ---------------------------------------------------------------------------
-  z_err <- switch(family,
-                  lognormal   = rnorm(N),
-                  loglogistic = stats::rlogis(N),
-                  weibull     = log(rexp(N))   # log(Exp(1)) ~ Gumbel_min(0,1)
-  )
+  z_err <- if (family == "lognormal") rnorm(N) else stats::rlogis(N)
   
   # ---------------------------------------------------------------------------
   # 7.  Shared cluster frailty
@@ -288,9 +236,7 @@ simulate_AFT_interaction <- function(
     gamma            = gamma,
     sigma            = sigma,
     tau              = tau,
-    weibull_shape    = if (family == "weibull") 1 / sigma else NA_real_,
-    u                = u_j,
-    n_subjects       = nj           # integer vector of realized cluster sizes
+    u                = u_j
   )
 }
 

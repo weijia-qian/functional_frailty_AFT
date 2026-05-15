@@ -46,6 +46,11 @@ ggplot(data2, aes(x = time, fill = as.factor(event))) +
   theme(legend.position = "bottom")
 ```
 
+```{r}
+
+```
+
+
 ```{r data cleaning}
 # define s_grid (length P)
 # s_grid <- seq(1/60, 24, length = 1440)
