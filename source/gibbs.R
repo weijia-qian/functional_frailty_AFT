@@ -91,11 +91,10 @@ cma_band <- function(beta_draws, level = 0.95, eps = 1e-12) {
   S_use <- pmax(S_hat, eps)
   
   # d^q = max_t |beta^q(t)-beta_hat(t)| / S_hat(t)
-  d <- apply(
-    abs(beta_draws - matrix(beta_hat, Q, P, byrow = TRUE)) /
-      matrix(S_use, Q, P, byrow = TRUE),
-    1, max
-  )
+  # Computed row-wise rather than by building two more Q x P matrices: the
+  # surface grid is 900 points and Q is 10,000 draws, so the matrix form
+  # allocates ~150 MB of temporaries on top of the draws themselves.
+  d <- apply(beta_draws, 1, function(r) max(abs(r - beta_hat) / S_use))
   
   # critical value
   qd <- as.numeric(quantile(d, probs = level, names = FALSE))

@@ -6,7 +6,13 @@ predict_gibbs_interaction <- function(fit,
                                       cluster_id_new = NULL,
                                       type = c("link", "response", "survival"),
                                       times = NULL,
-                                      level = 0.95) {
+                                      level = 0.95,
+                                      quantiles = TRUE) {
+  # `quantiles = FALSE` returns only $mean and skips the pointwise credible
+  # bands.  Those bands cost two apply(., 1, quantile) passes per time point
+  # over an N_new x n_draws matrix -- at N_new = 1000, 10,000 draws and 19 time
+  # points that is ~38,000 quantile calls and the bulk of the runtime.  The
+  # simulation runner only ever uses $mean, so it opts out.
   
   type <- match.arg(type)
   require(mgcv)
@@ -61,96 +67,90 @@ predict_gibbs_interaction <- function(fit,
     W_new[i, ] <- colSums(X_new[i, ] * Phi_i * w_dt)
   }
   
-  # Calculate draws for the interaction term
-  int_draws <- W_new %*% t(fit$b) 
-  
-  # ---- 4. Calculate Scalar Component Draws (N_new x S_iter) ----
-  if (!is.null(Z_new) && meta$M > 0) {
-    if (ncol(Z_new) != meta$M) stop("Z_new dimensions do not match training data.")
-    scalar_draws <- Z_new %*% t(fit$gamma)
-  } else {
-    scalar_draws <- matrix(0, nrow = N_new, ncol = S_iter)
-  }
-  
-  # ---- 5. Calculate Frailty Component Draws (N_new x S_iter) ----
-  frailty_draws <- matrix(0, nrow = N_new, ncol = S_iter)
+  # ---- 4-7. Scalar + frailty components, combined and summarised in ROW BLOCKS ----
+  # int/scalar/frailty draws are each N_new x S_iter (76 MB at N_new = 1000 and
+  # 10,000 draws), and the survival branch forms three more of that size on every
+  # time step -- ~1.2 GB peak.  Processing subjects in blocks caps the transient
+  # at block x S_iter without changing any result: every output is a per-subject
+  # summary, so the blocking only changes the order of allocation.
+  block <- max(1L, min(N_new, floor(2e6 / max(S_iter, 1L))))
+
+  cid_indices <- NULL
   if (!is.null(cluster_id_new) && meta$J > 0) {
-    
-    # Safely map categorical factors / character strings to integer column indices
     if (!is.null(meta$cluster_levels)) {
       cid_indices <- match(as.character(cluster_id_new), meta$cluster_levels)
     } else {
       cid_indices <- suppressWarnings(as.numeric(as.character(cluster_id_new)))
-      if (any(is.na(cid_indices) & !is.na(cluster_id_new))) {
-        if (is.factor(cluster_id_new)) {
-          cid_indices <- as.integer(cluster_id_new)
+      if (any(is.na(cid_indices) & !is.na(cluster_id_new)) && is.factor(cluster_id_new)) {
+        cid_indices <- as.integer(cluster_id_new)
+      }
+    }
+  }
+  if (!is.null(Z_new) && meta$M > 0 && ncol(Z_new) != meta$M)
+    stop("Z_new dimensions do not match training data.")
+
+  # Transposes hoisted out of the block loop: t(fit$b) is K x S_iter (11 MB at
+  # 10,000 draws) and was otherwise rebuilt for every block.
+  bt <- t(fit$b)
+  gt <- if (!is.null(Z_new) && meta$M > 0) t(fit$gamma) else NULL
+
+  # mu draws for one block of subjects
+  mu_block <- function(idx) {
+    mu <- W_new[idx, , drop = FALSE] %*% bt
+    if (!is.null(gt)) mu <- mu + Z_new[idx, , drop = FALSE] %*% gt
+    if (!is.null(cid_indices)) {
+      j <- cid_indices[idx]
+      ok <- !is.na(j) & j > 0 & j <= meta$J
+      if (any(ok)) mu[ok, ] <- mu[ok, , drop = FALSE] + t(fit$u[, j[ok], drop = FALSE])
+    }
+    mu
+  }
+
+  res <- list()
+  if (type %in% c("link", "response")) {
+    res$mean <- numeric(N_new)
+    if (quantiles) { res$lower <- numeric(N_new); res$upper <- numeric(N_new) }
+    for (st in seq(1L, N_new, by = block)) {
+      idx <- st:min(st + block - 1L, N_new)
+      d <- mu_block(idx)
+      if (type == "response") d <- exp(d)
+      res$mean[idx] <- rowMeans(d)
+      if (quantiles) {
+        res$lower[idx] <- apply(d, 1, quantile, probs[1])
+        res$upper[idx] <- apply(d, 1, quantile, probs[2])
+      }
+    }
+  } else { # survival
+    if (is.null(times) || any(times <= 0))
+      stop("`times` must be a numeric vector of strictly positive values.")
+    sigma_draws <- sqrt(fit$sigma2)
+    nt <- length(times)
+    res$mean <- matrix(NA_real_, N_new, nt)
+    if (quantiles) {
+      res$lower <- matrix(NA_real_, N_new, nt); res$upper <- matrix(NA_real_, N_new, nt)
+    }
+    for (st in seq(1L, N_new, by = block)) {
+      idx <- st:min(st + block - 1L, N_new)
+      mu <- mu_block(idx)
+      for (k in seq_len(nt)) {
+        S_draws <- 1 - pnorm(sweep(log(times[k]) - mu, 2, sigma_draws, `/`))
+        res$mean[idx, k] <- rowMeans(S_draws)
+        if (quantiles) {
+          res$lower[idx, k] <- apply(S_draws, 1, quantile, probs[1])
+          res$upper[idx, k] <- apply(S_draws, 1, quantile, probs[2])
         }
       }
     }
-    
-    # Loop over the new numeric indices
-    for (i in seq_len(N_new)) {
-      idx <- cid_indices[i]
-      if (!is.na(idx) && idx > 0 && idx <= meta$J) {
-        frailty_draws[i, ] <- fit$u[, idx]
-      }
-    }
+    colnames(res$mean) <- as.character(times)
+    if (quantiles)
+      colnames(res$lower) <- colnames(res$upper) <- as.character(times)
   }
-  
-  # ---- 6. Combine for Linear Predictor (mu) Draws ----
-  mu_draws <- int_draws + scalar_draws + frailty_draws
-  
-  # ---- 7. Process Output by Type ----
-  res <- list()
-  
-  if (type == "link") {
-    res$mean  <- rowMeans(mu_draws)
-    res$lower <- apply(mu_draws, 1, quantile, probs[1])
-    res$upper <- apply(mu_draws, 1, quantile, probs[2])
-    
-  } else if (type == "response") {
-    resp_draws <- exp(mu_draws)
-    res$mean  <- rowMeans(resp_draws)
-    res$lower <- apply(resp_draws, 1, quantile, probs[1])
-    res$upper <- apply(resp_draws, 1, quantile, probs[2])
-    
-  } else { # type == "survival"
-    if (is.null(times) || any(times <= 0)) {
-      stop("`times` must be a numeric vector of strictly positive values.")
-    }
-    
-    sigma_draws <- sqrt(fit$sigma2) 
-    
-    S_mean  <- matrix(NA, nrow = N_new, ncol = length(times))
-    S_lower <- matrix(NA, nrow = N_new, ncol = length(times))
-    S_upper <- matrix(NA, nrow = N_new, ncol = length(times))
-    
-    for (k in seq_along(times)) {
-      lt <- log(times[k])
-      z_num <- lt - mu_draws 
-      z_draws <- sweep(z_num, 2, sigma_draws, `/`)
-      
-      S_draws <- 1 - pnorm(z_draws)
-      
-      S_mean[, k]  <- rowMeans(S_draws)
-      S_lower[, k] <- apply(S_draws, 1, quantile, probs[1])
-      S_upper[, k] <- apply(S_draws, 1, quantile, probs[2])
-    }
-    
-    colnames(S_mean) <- colnames(S_lower) <- colnames(S_upper) <- as.character(times)
-    
-    res$mean  <- S_mean
-    res$lower <- S_lower
-    res$upper <- S_upper
-  }
-  
+
   if (!is.null(rownames(X_new))) {
-    if (type == "survival") {
-      rownames(res$mean) <- rownames(res$lower) <- rownames(res$upper) <- rownames(X_new)
-    } else {
-      names(res$mean) <- names(res$lower) <- names(res$upper) <- rownames(X_new)
-    }
+    setnm <- if (type == "survival") `rownames<-` else `names<-`
+    for (nm in intersect(c("mean", "lower", "upper"), names(res)))
+      res[[nm]] <- setnm(res[[nm]], rownames(X_new))
   }
-  
+
   return(res)
 }

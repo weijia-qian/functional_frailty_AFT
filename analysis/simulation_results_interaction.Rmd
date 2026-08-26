@@ -16,6 +16,7 @@ library(gt)
 library(kableExtra)
 library(MASS)
 library(patchwork)
+library(purrr)
 library(refund)
 library(scam)
 library(splines)
@@ -43,7 +44,7 @@ my_colors <- c(
 )
 fig_dir <- "/Users/weijia/Research/Frailty/analysis/figures"
 
-folder_path <- "/Users/weijia/Research/Frailty/outputs/20260505"
+folder_path <- "/Users/weijia/Research/Frailty/outputs/20260515"
 rda_files <- list.files(path = folder_path, pattern = "\\.RDA$", full.names = TRUE)
 all_results <- list()
 for (i in 1:length(rda_files)) {
@@ -94,50 +95,111 @@ table_coef <- all_coef %>%
             sigma2_mean_cover = mean(sigma2_cover)
             )
 
-table_beta_bias <- all_coef %>%
-  group_by(beta_type, family, n_cluster, tau, sigma, censor_rate) %>%
-  summarise(
-    across(
-      starts_with("beta_bias_"),
-      ~ mean(.x, na.rm = TRUE)
-    ),
-    .groups = "drop"
-  )  %>%
-  pivot_longer(
-    cols = starts_with("beta_bias_"),
-    names_to = "beta_index",
-    values_to = "bias"
-  ) %>%
-  mutate(
-    beta_index = as.integer(gsub("beta_bias_", "", beta_index))
-  )
-
-plot_beta_bias <- table_beta_bias %>%
-  filter(tau == 2) %>%
-  ggplot(aes(x = beta_index, y = bias, color = factor(sigma), group = sigma)) +
-  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.4) +
-  geom_line(linewidth = 0.7) +
-  # geom_point(size = 2) +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(
-    x = "Function index",
-    y = expression("Bias of"~beta(s)),
-    color = expression(sigma)
-  )
-plot_beta_bias
+# table_beta_bias <- all_coef %>%
+#   group_by(beta_type, family, n_cluster, tau, sigma, censor_rate) %>%
+#   summarise(
+#     across(
+#       starts_with("beta_bias_"),
+#       ~ mean(.x, na.rm = TRUE)
+#     ),
+#     .groups = "drop"
+#   )  %>%
+#   pivot_longer(
+#     cols = starts_with("beta_bias_"),
+#     names_to = "beta_index",
+#     values_to = "bias"
+#   ) %>%
+#   mutate(
+#     beta_index = as.integer(gsub("beta_bias_", "", beta_index))
+#   )
+# 
+# plot_beta_bias <- table_beta_bias %>%
+#   filter(tau == 2) %>%
+#   ggplot(aes(x = beta_index, y = bias, color = factor(sigma), group = sigma)) +
+#   geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.4) +
+#   geom_line(linewidth = 0.7) +
+#   # geom_point(size = 2) +
+#   facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
+#   labs(
+#     x = "Function index",
+#     y = expression("Bias of"~beta(s)),
+#     color = expression(sigma)
+#   )
+# plot_beta_bias
 
 # Box plot: MISE of beta(s)
 plot_beta_mise <- all_coef %>%
-  filter(beta_type == "ridge" & censor_rate == 0.25) %>%
-  ggplot(aes(factor(n_cluster), beta_ise)) +
-  geom_boxplot(fatten = 1.3) +
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-  labs(x = "Number of clusters", y = expression("MISE of"~beta(s)),
-       subtitle = "beta_type = ridge, censor_rate = 0.25")
-plot_beta_mise
+  filter(beta_type == "additive") %>%
+  split(.$family) %>%
+  map(~{
+    
+    fam_name <- unique(.x$family)
+    
+    ggplot(.x, aes(factor(n_cluster), beta_ise)) +
+      geom_boxplot(fatten = 1.3) +
+      facet_grid(
+        censor_rate ~ tau,
+        labeller = labeller(
+          censor_rate = label_both,
+          tau = label_both
+        )
+      ) +
+      labs(
+        x = "Number of clusters",
+        y = expression("MISE of" ~ beta(s)),
+        subtitle = paste("family =", fam_name,
+                         ", beta_type = additive")
+      )
+  })
+
+iwalk(plot_beta_mise, ~{
+  ggsave(
+    filename = paste0(fig_dir, "/plot_beta_mise_", .y, ".png"),
+    plot = .x,
+    width = 10,
+    height = 6,
+    dpi = 300
+  )
+})
+
+# plot_beta_mise <- all_coef %>%
+#   filter(family == "lognormal", beta_type == "additive") %>%
+#   ggplot(aes(factor(n_cluster), beta_ise)) +
+#   geom_boxplot(fatten = 1.3) +
+#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
+#   facet_grid(censor_rate~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
+#   labs(x = "Number of clusters", y = expression("MISE of"~beta(s)),
+#        subtitle = "family = lognormal, beta_type = additive")
+# plot_beta_mise
 
 # Bar plot: coverage of beta(s)
+plot_beta_cover <- all_coef %>%
+  filter(beta_type == "additive") %>%
+  split(.$family) %>%
+  map(~{
+    
+    fam_name <- unique(.x$family)
+    
+    ggplot(.x, aes(factor(n_cluster), beta_cover_pw)) + 
+      geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
+      geom_hline(yintercept = 0.95, color = "red",lty = "dashed") +
+      facet_grid(censor_rate ~ tau, labeller = labeller(censor_rate = label_both,tau = label_both)) +
+      labs(
+        x = "Number of clusters",
+        y = expression("Coverage of 95% CI for" ~ beta(s)),
+        subtitle = paste("family =", fam_name, ", beta_type = additive"))
+    })
+
+iwalk(plot_beta_cover, ~{
+  ggsave(
+    filename = paste0(fig_dir, "/plot_beta_cover_", .y, ".png"),
+    plot = .x,
+    width = 10,
+    height = 6,
+    dpi = 300
+  )
+})
+
 plot_beta_cover <- all_coef %>%
   filter(beta_type == "additive" & censor_rate == 0.25) %>%
   ggplot(aes(factor(n_cluster), beta_cover_pw)) + 
@@ -154,74 +216,161 @@ plot_beta_cover
 ```{r tau2}
 # Box plot: bias of tau2
 plot_tau2_bias <- all_coef %>%
-  filter(beta_type == "ridge" & censor_rate == 0.25) %>%
-  ggplot(aes(factor(n_cluster), tau2_bias)) + 
-  geom_boxplot(fatten = 1.3) +
-  geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-  labs(x = "Number of clusters", y = expression("Bias of"~tau^2),
-       subtitle = "beta_type = ridge, censor_rate = 0.25")
-plot_tau2_bias
+  filter(beta_type == "additive") %>%
+  split(.$family) %>%
+  map(~{
+    
+    fam_name <- unique(.x$family)
+    
+    ggplot(.x, aes(factor(n_cluster), tau2_bias)) +
+      geom_boxplot(fatten = 1.3) +
+      geom_hline(yintercept = 0, color = "red", lty = "dashed")+
+      facet_grid(censor_rate ~ tau, labeller = labeller(censor_rate = label_both, tau = label_both)) +
+      labs(
+        x = "Number of clusters",
+        y = expression("Bias of"~tau^2),
+        subtitle = paste("family =", fam_name,
+                         ", beta_type = additive")
+      )
+  })
 
-# Box plot: MSE of tau2
-plot_tau2_mse <- all_coef %>%
-  filter(sigma == 1) %>%
-  ggplot(aes(factor(tau), tau2_se)) + 
-  geom_boxplot(fatten = 1.3) +
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(tau), y = expression("MSE of"~tau^2))
-plot_tau2_mse
+iwalk(plot_tau2_bias, ~{
+  ggsave(filename = paste0(fig_dir, "/plot_tau2_bias_", .y, ".png"),
+         plot = .x, width = 10, height = 6, dpi = 300)})
+
+# plot_tau2_bias <- all_coef %>%
+#   filter(beta_type == "ridge" & censor_rate == 0.25) %>%
+#   ggplot(aes(factor(n_cluster), tau2_bias)) + 
+#   geom_boxplot(fatten = 1.3) +
+#   geom_hline(yintercept = 0, color = "red", lty = "dashed")+
+#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
+#   facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
+#   labs(x = "Number of clusters", y = expression("Bias of"~tau^2),
+#        subtitle = "beta_type = ridge, censor_rate = 0.25")
+# plot_tau2_bias
+# 
+# # Box plot: MSE of tau2
+# plot_tau2_mse <- all_coef %>%
+#   filter(sigma == 1) %>%
+#   ggplot(aes(factor(tau), tau2_se)) + 
+#   geom_boxplot(fatten = 1.3) +
+#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
+#   facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
+#   labs(x = expression(tau), y = expression("MSE of"~tau^2))
+# plot_tau2_mse
 
 # Bar plot: coverage of tau2
 plot_tau2_cover <- all_coef %>%
-  filter(beta_type == "bilinear" & censor_rate == 0.25) %>%
-  ggplot(aes(factor(n_cluster), as.numeric(tau2_cover))) + 
-  geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-  geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-  labs(x = "Number of clusters", y = expression("Coverage of 95% CI for"~tau^2),
-       subtitle = "beta_type = bilinear, censor_rate = 0.25")
-plot_tau2_cover
+  filter(beta_type == "additive") %>%
+  split(.$family) %>%
+  map(~{
+    
+    fam_name <- unique(.x$family)
+    
+    ggplot(.x, aes(factor(n_cluster), as.numeric(tau2_cover))) + 
+      geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
+      geom_hline(yintercept = 0.95, color = "red",lty = "dashed") +
+      facet_grid(censor_rate ~ tau, labeller = labeller(censor_rate = label_both,tau = label_both)) +
+      labs(
+        x = "Number of clusters",
+        y = expression("Coverage of 95% CI for" ~ beta(s)),
+        subtitle = paste("family =", fam_name, ", beta_type = additive"))
+    })
+
+iwalk(plot_tau2_cover, ~{
+  ggsave(filename = paste0(fig_dir, "/plot_tau2_cover_", .y, ".png"),
+         plot = .x, width = 10, height = 6, dpi = 300)})
+
+# plot_tau2_cover <- all_coef %>%
+#   filter(beta_type == "bilinear" & censor_rate == 0.25) %>%
+#   ggplot(aes(factor(n_cluster), as.numeric(tau2_cover))) + 
+#   geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
+#   geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
+#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
+#   facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
+#   labs(x = "Number of clusters", y = expression("Coverage of 95% CI for"~tau^2),
+#        subtitle = "beta_type = bilinear, censor_rate = 0.25")
+# plot_tau2_cover
 ```
 
 
 ```{r sigma2}
 # Box plot: bias of sigma2
 plot_sigma2_bias <- all_coef %>%
-  filter(beta_type == "bilinear" & censor_rate == 0.25) %>%
-  ggplot(aes(factor(n_cluster), sigma2_bias)) + 
-  geom_boxplot(fatten = 1.3) +
-  geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-  labs(x = "Number of clusters", y = expression("Bias of"~sigma^2),
-       subtitle = "beta_type = bilinear, censor_rate = 0.25")
-plot_sigma2_bias
+  filter(beta_type == "additive") %>%   # cox now has a sigma2 target: pi^2/(6*rho^2)
+  split(.$family) %>%
+  map(~{
+    
+    fam_name <- unique(.x$family)
+    
+    ggplot(.x, aes(factor(n_cluster), sigma2_bias)) +
+      geom_boxplot(fatten = 1.3) +
+      geom_hline(yintercept = 0, color = "red", lty = "dashed")+
+      facet_grid(censor_rate ~ tau, labeller = labeller(censor_rate = label_both, tau = label_both)) +
+      labs(
+        x = "Number of clusters",
+        y = expression("Bias of"~tau^2),
+        subtitle = paste("family =", fam_name,
+                         ", beta_type = additive")
+      )
+  })
 
-# Box plot: MSE of sigma2
-plot_sigma2_mse <- all_coef %>%
-  filter(tau == 1) %>%
-  ggplot(aes(factor(sigma), sigma2_se)) + 
-  geom_boxplot(fatten = 1.3) +
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(sigma), y = expression("MSE of"~sigma^2))
-plot_sigma2_mse
+iwalk(plot_sigma2_bias, ~{
+  ggsave(filename = paste0(fig_dir, "/plot_sigma2_bias_", .y, ".png"),
+         plot = .x, width = 10, height = 6, dpi = 300)})
+
+# plot_sigma2_bias <- all_coef %>%
+#   filter(beta_type == "bilinear" & censor_rate == 0.25) %>%
+#   ggplot(aes(factor(n_cluster), sigma2_bias)) + 
+#   geom_boxplot(fatten = 1.3) +
+#   geom_hline(yintercept = 0, color = "red", lty = "dashed")+
+#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
+#   facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
+#   labs(x = "Number of clusters", y = expression("Bias of"~sigma^2),
+#        subtitle = "beta_type = bilinear, censor_rate = 0.25")
+# plot_sigma2_bias
+# 
+# # Box plot: MSE of sigma2
+# plot_sigma2_mse <- all_coef %>%
+#   filter(tau == 1) %>%
+#   ggplot(aes(factor(sigma), sigma2_se)) + 
+#   geom_boxplot(fatten = 1.3) +
+#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
+#   facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
+#   labs(x = expression(sigma), y = expression("MSE of"~sigma^2))
+# plot_sigma2_mse
 
 # Bar plot: coverage of sigma2
 plot_sigma2_cover <- all_coef %>%
-  filter(beta_type == "bilinear" & censor_rate == 0.25) %>%
-  ggplot(aes(factor(n_cluster), as.numeric(sigma2_cover))) + 
-  geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-  geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-  labs(x = "Number of clusters", y = expression("Coverage of 95% CI for"~sigma^2),
-       subtitle = "beta_type = bilinear, censor_rate = 0.25")
-plot_sigma2_cover
+  filter(beta_type == "additive") %>%   # cox now has a sigma2 target: pi^2/(6*rho^2)
+  split(.$family) %>%
+  map(~{
+    
+    fam_name <- unique(.x$family)
+    
+    ggplot(.x, aes(factor(n_cluster), as.numeric(sigma2_cover))) + 
+      geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
+      geom_hline(yintercept = 0.95, color = "red",lty = "dashed") +
+      facet_grid(censor_rate ~ tau, labeller = labeller(censor_rate = label_both,tau = label_both)) +
+      labs(
+        x = "Number of clusters",
+        y = expression("Coverage of 95% CI for" ~ beta(s)),
+        subtitle = paste("family =", fam_name, ", beta_type = additive"))
+    })
+
+iwalk(plot_sigma2_cover, ~{
+  ggsave(filename = paste0(fig_dir, "/plot_sigma2_cover_", .y, ".png"),
+         plot = .x, width = 10, height = 6, dpi = 300)})
+# plot_sigma2_cover <- all_coef %>%
+#   filter(beta_type == "bilinear" & censor_rate == 0.25) %>%
+#   ggplot(aes(factor(n_cluster), as.numeric(sigma2_cover))) + 
+#   geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
+#   geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
+#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
+#   facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
+#   labs(x = "Number of clusters", y = expression("Coverage of 95% CI for"~sigma^2),
+#        subtitle = "beta_type = bilinear, censor_rate = 0.25")
+# plot_sigma2_cover
 ```
 
 ```{r gamma0}

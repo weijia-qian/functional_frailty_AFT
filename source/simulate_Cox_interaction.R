@@ -49,7 +49,18 @@ simulate_Cox_interaction <- function(
     gamma            = c(0.5, 0.3, -0.2), # c(intercept, Z1, Z2)
     lambda_0         = 0.1,       # Weibull baseline rate
     rho              = 1.5,       # Weibull shape (rho=1: exponential)
+    beta_scale       = 1,         # multiplies beta(s, a).  The runner passes rho
+                                  # so that the IMPLIED AFT-scale surface,
+                                  # -beta_Cox/rho, matches the AFT arms' beta in
+                                  # magnitude; without it the Cox arm carries a
+                                  # factor 1/rho less functional signal.
     tau              = 0.5,       # frailty SD: u_j ~ N(0, tau^2)
+    u                = NULL,      # optional: supply the cluster frailties directly
+                                  # (numeric, length n_cluster) instead of drawing
+                                  # them.  Used to generate a second sample that
+                                  # shares an existing sample's frailties, i.e. new
+                                  # subjects in KNOWN clusters.  `tau` is then
+                                  # ignored for the frailty draw but still recorded.
     censor_rate      = 0.25       # target censoring proportion (0 = none)
 ) {
   
@@ -72,14 +83,27 @@ simulate_Cox_interaction <- function(
   nj_min  <- max(1L, floor(mean_nj  * (1 - range_factor)))
   nj_max  <- ceiling(mean_nj * (1 + range_factor))
   
-  # Draw J-1 sizes; last cluster absorbs the remainder.
-  # Repeat until the remainder is also >= 1 (rare edge case when all J-1
-  # draws round up simultaneously and exhaust the budget).
-  repeat {
-    nj            <- pmax(1L, round(runif(n_cluster - 1L, nj_min, nj_max)))
-    nj[n_cluster] <- as.integer(N_total - sum(nj))
-    if (nj[n_cluster] >= 1L) break
+  # Draw ALL J sizes from the Uniform, then reconcile the total by moving
+  # subjects one at a time between randomly chosen clusters.
+  #
+  # The previous version drew J-1 sizes and let the last cluster absorb the
+  # whole remainder, which left it systematically larger and far more variable
+  # than the others -- at N=4000, J=25 it averaged 260 (sd 176) against 156
+  # (sd 46) for the rest, and at J=75 it averaged 145 against a nominal range
+  # of [26, 80].  It also had to reject and redraw ~35% of the time, which bent
+  # the other clusters' distribution.  Spreading the discrepancy keeps every
+  # cluster close to Uniform(nj_min, nj_max) and needs no rejection.
+  nj   <- pmax(1L, round(runif(n_cluster, nj_min, nj_max)))
+  diff <- as.integer(N_total - sum(nj))
+  while (diff != 0L) {
+    i <- sample.int(n_cluster, 1L)
+    if (diff > 0L) {
+      nj[i] <- nj[i] + 1L; diff <- diff - 1L
+    } else if (nj[i] > 1L) {
+      nj[i] <- nj[i] - 1L; diff <- diff + 1L
+    }
   }
+  stopifnot(sum(nj) == N_total, all(nj >= 1L))
   
   N          <- sum(nj)                  # == N_total
   cluster_id <- rep(seq_len(n_cluster), times = nj)
@@ -170,6 +194,23 @@ simulate_Cox_interaction <- function(
   }
   
   # ---------------------------------------------------------------------------
+  # 4b.  Scale the surface.
+  #
+  #  Inverting the Weibull baseline maps the log-hazard surface to the log-time
+  #  scale as beta_AFT = -beta_Cox / rho, so a Cox arm specified with the same
+  #  beta_fn as the AFT arms ends up with 1/rho times their functional signal.
+  #  Passing beta_scale = rho restores parity: beta_AFT = -beta_fn exactly.
+  #  Applied here so the integration below, and the plotting grid in section 11,
+  #  both see the scaled surface.
+  # ---------------------------------------------------------------------------
+  if (!isTRUE(all.equal(beta_scale, 1))) {
+    beta_fn <- local({
+      f <- beta_fn; sc <- beta_scale
+      function(s, a) sc * f(s, a)
+    })
+  }
+
+  # ---------------------------------------------------------------------------
   # 5.  Numerical integration:  num_int_i = sum_s X_i(s) * beta(s, a_i) * w(s)
   #
   #   Because beta depends on each subject's age, the surface is evaluated
@@ -186,7 +227,13 @@ simulate_Cox_interaction <- function(
   # ---------------------------------------------------------------------------
   # 6.  Shared cluster frailty  u_j ~ N(0, tau^2)  on the log-hazard scale
   # ---------------------------------------------------------------------------
-  u_j     <- rnorm(n_cluster, mean = 0, sd = tau)
+  if (is.null(u)) {
+    u_j <- rnorm(n_cluster, mean = 0, sd = tau)
+  } else {
+    if (length(u) != n_cluster)
+      stop("`u` must have length n_cluster (", n_cluster, "), got ", length(u), ".")
+    u_j <- as.numeric(u)
+  }
   frailty <- u_j[cluster_id]
   
   # ---------------------------------------------------------------------------
@@ -266,6 +313,7 @@ simulate_Cox_interaction <- function(
     beta_surface_mat = beta_surface_mat, # nS x 51 matrix
     s_grid           = s_grid,
     beta_type        = beta_type,
+    beta_scale       = beta_scale,
     dgm              = "cox",
     age_range        = age_range,
     gamma            = gamma,
