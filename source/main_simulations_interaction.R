@@ -51,7 +51,7 @@ if(substring(wd, 2, 6) == "Users"){
 source(here("source", "gibbs.R"))
 source(here("source", "gibbs_frailty_interaction.R"))
 source(here("source", "predict_gibbs_interaction.R"))
-source(here("source", "predict_gibbs.R"))       # comparator predictions
+# source(here("source", "predict_gibbs.R"))       # comparator predictions
 source(here("source", "cal_Brier.R"))
 source(here("source", "simulate_AFT_interaction.R"))
 source(here("source", "simulate_Cox_interaction.R"))
@@ -60,17 +60,18 @@ source(here("source", "simulate_Cox_interaction.R"))
 ## set simulation design elements
 ###############################################################
 family = c("lognormal", "loglogistic", "cox")
-N_total = c(4000)
+N_total = c(1000, 2000, 4000)
 n_cluster = c(25, 50, 75)
 nS = c(100)
-beta_type = c("additive", "bilinear", "ridge")
+beta_type = c("additive")
+# beta_type = c("additive", "bilinear", "ridge")
 tau = c(0.2, 0.5, 1)  # AFT-scale (log-time) frailty SD target, common to all
                       # families; the Cox arm is simulated at rho * tau
 sigma = c(1)       # AFT-scale (log-time) RESIDUAL SD target, common to all
                    # families.  Each DGM takes a different scale parameter to
                    # hit it; for the Cox arm it also fixes rho.  See below.
 censor_rate = c(0.25, 0.5, 0.75)
-N_iter = 100
+N_iter = 500
 N_test = 1000      # out-of-sample test set size (new subjects, NEW clusters)
 N_known = 1000     # out-of-sample test set size (new subjects, KNOWN clusters);
                    # drawn per iteration sharing the training data's frailties
@@ -267,7 +268,7 @@ mat_grid <- function() matrix(NA_real_, N_iter, n_point)
 mat_s    <- function() matrix(NA_real_, N_iter, n_eval_s)
 surf     <- list(mean = mat_grid(), sd = mat_grid(),
                  q025 = mat_grid(), q975 = mat_grid())
-ni_surf  <- list(mean = mat_s(), sd = mat_s(), q025 = mat_s(), q975 = mat_s())
+# ni_surf  <- list(mean = mat_s(), sd = mat_s(), q025 = mat_s(), q975 = mat_s())
 
 # Per-iteration seeds
 seeds <- sample.int(1e8, N_iter)
@@ -591,126 +592,126 @@ for(iter in 1:N_iter){
     if (as.character(family) == "cox") u_true <- -u_true / sim_data$rho
     cor_u  <- suppressWarnings(cor(u_hat, u_true))
 
-    ###############################################################
-    ## COMPARATOR — no-interaction functional frailty AFT
-    ##
-    ## Identical to the fitted model except the coefficient is beta(s) rather
-    ## than beta(s, age): same error, frailty, augmentation, priors, MCMC length
-    ## and s-basis, fitted to the same data and scored on the same grid and test
-    ## sets, so every ni_* column pairs with its unprefixed counterpart.
-    ## beta_hat(s) is broadcast along age -- the restriction the comparator
-    ## imposes -- so ni_beta_ise vs beta_ise is the cost of ignoring the
-    ## interaction.
-    ###############################################################
-
-    tic()
-    fit_ni <- gibbs_functional_frailty(
-      time = data$Y, status = data$delta, cluster_id = data$cluster_id,
-      Z = Z, X = data$X, s_grid = s_grid,
-      K = K_s_fit, basis_type = bs_s_fit,
-      lambda_init = 1, A_lambda = 1, B_lambda = 1,
-      var_gamma = 100,
-      A_tau2 = 3, B_tau2 = 2,
-      A_sigma2 = 3, B_sigma2 = 2,
-      n_iter = n_iter_fit, n_burn = n_burn_fit, n_thin = 1, verbose = FALSE
-    )
-    ts_ni   <- toc(quiet = TRUE)
-    time_ni <- ts_ni$toc - ts_ni$tic
-
-    # --- beta_hat(s) on the evaluation grid, held constant across age ---
-    # Rebuild the sampler's own smooth on s_grid, then evaluate at s_eval.
-    sm_ni <- smoothCon(s(s_grid, k = K_s_fit, bs = bs_s_fit),
-                       data = data.frame(s_grid = s_grid), absorb.cons = FALSE)[[1]]
-    Phi_ni <- PredictMat(sm_ni, data.frame(s_grid = s_eval))   # n_eval_s x K
-    stopifnot(ncol(Phi_ni) == ncol(fit_ni$b))
-
-    beta_ni_draws <- fit_ni$b %*% t(Phi_ni)                    # S x n_eval_s
-    ni_beta_mean  <- colMeans(beta_ni_draws)
-    ni_beta_q025  <- apply(beta_ni_draws, 2, quantile, 0.025, na.rm = TRUE)
-    ni_beta_q975  <- apply(beta_ni_draws, 2, quantile, 0.975, na.rm = TRUE)
-
-    # Band on the n_eval_s distinct columns, not the broadcast grid: duplicated
-    # columns change neither a per-column mean/sd nor a maximum, so qd and the
-    # band are identical without allocating the S x n_grid matrix.
-    cma_ni            <- cma_band(beta_ni_draws, level = 0.95)
-    ni_beta_sd        <- apply(beta_ni_draws, 2, sd)
-
-    # Broadcast along age (summaries only — never the S x n_grid draw matrix)
-    s_idx           <- match(grid_df$s_grid, s_eval)
-    ni_surface_mean <- ni_beta_mean[s_idx]
-    ni_surface_q025 <- ni_beta_q025[s_idx]
-    ni_surface_q975 <- ni_beta_q975[s_idx]
-
-    ni_beta_cover_sim <- all(beta_true_grid >= cma_ni$lower[s_idx] &
-                             beta_true_grid <= cma_ni$upper[s_idx])
-    ni_beta_cma_qd    <- cma_ni$qd
-
-    ni_resid          <- ni_surface_mean - beta_true_grid
-    ni_beta_ise       <- mean(ni_resid^2)
-    ni_beta_ise_rel   <- ni_beta_ise / beta_true_ss
-    ni_beta_bias_mean <- mean(ni_resid)
-    ni_beta_bias_max  <- max(abs(ni_resid))
-    ni_beta_cover_pw  <- mean((beta_true_grid >= ni_surface_q025) &
-                              (beta_true_grid <= ni_surface_q975))
-
-    # --- scalar parameters, against the same targets ---
-    ni_gamma_est   <- colMeans(fit_ni$gamma)
-    ni_gamma_bias  <- ni_gamma_est - gamma_implied
-    ni_gamma_se    <- (ni_gamma_est - gamma_implied)^2
-    q_ni_gamma     <- apply(fit_ni$gamma, 2, quantile, probs = c(0.025, 0.975), na.rm = TRUE)
-    ni_gamma_cover <- (gamma_implied >= q_ni_gamma[1, ]) & (gamma_implied <= q_ni_gamma[2, ])
-
-    ni_tau2_est   <- mean(fit_ni$tau2)
-    ni_tau2_bias  <- ni_tau2_est - tau2_implied
-    ni_tau2_se    <- (ni_tau2_est - tau2_implied)^2
-    ni_tau2_cover <- (tau2_implied >= quantile(fit_ni$tau2, 0.025)) &
-      (tau2_implied <= quantile(fit_ni$tau2, 0.975))
-
-    ni_sigma2_est   <- mean(fit_ni$sigma2)
-    ni_sigma2_bias  <- ni_sigma2_est - sigma2_true
-    ni_sigma2_se    <- (ni_sigma2_est - sigma2_true)^2
-    ni_sigma2_cover <- (sigma2_true >= quantile(fit_ni$sigma2, 0.025)) &
-      (sigma2_true <= quantile(fit_ni$sigma2, 0.975))
-
-    # --- predictive: same test sets, same horizons, same risk-score convention ---
-    ni_pred_marg <- {
-      lk <- predict_gibbs_frailty(fit_ni, X_new = test_data$X, Z_new = Z_test,
-              cluster_id_new = NULL, type = "link", level = 0.95, quantiles = FALSE)
-      sv <- predict_gibbs_frailty(fit_ni, X_new = test_data$X, Z_new = Z_test,
-              cluster_id_new = NULL, type = "survival", times = tgrid,
-              level = 0.95, quantiles = FALSE)
-      c(c_index = survAUC::UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_test,
-                                lpnew = -lk$mean, time = tau_eval),
-        ibs = as.numeric(cal_IPCW_Brier(sv$mean, test_data$Y, test_data$delta,
-                                        data$Y, data$delta, tgrid,
-                                        G_data = "test", eps_G = eps_G)))
-    }
-
-    eval_known_ni <- function(cid) {
-      lk <- predict_gibbs_frailty(fit_ni, X_new = known_data$X, Z_new = Z_known,
-              cluster_id_new = cid, type = "link", level = 0.95, quantiles = FALSE)
-      sv <- predict_gibbs_frailty(fit_ni, X_new = known_data$X, Z_new = Z_known,
-              cluster_id_new = cid, type = "survival", times = tgrid_known,
-              level = 0.95, quantiles = FALSE)
-      c(c_index = survAUC::UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_known,
-                                lpnew = -lk$mean, time = tau_known),
-        ibs = as.numeric(cal_IPCW_Brier(sv$mean, known_data$Y, known_data$delta,
-                                        data$Y, data$delta, tgrid_known,
-                                        G_data = "test", eps_G = eps_G)))
-    }
-    ni_cond <- eval_known_ni(known_data$cluster_id)
-    ni_marg <- eval_known_ni(NULL)
+    # ###############################################################
+    # ## COMPARATOR — no-interaction functional frailty AFT
+    # ##
+    # ## Identical to the fitted model except the coefficient is beta(s) rather
+    # ## than beta(s, age): same error, frailty, augmentation, priors, MCMC length
+    # ## and s-basis, fitted to the same data and scored on the same grid and test
+    # ## sets, so every ni_* column pairs with its unprefixed counterpart.
+    # ## beta_hat(s) is broadcast along age -- the restriction the comparator
+    # ## imposes -- so ni_beta_ise vs beta_ise is the cost of ignoring the
+    # ## interaction.
+    # ###############################################################
+#
+    # tic()
+    # fit_ni <- gibbs_functional_frailty(
+      # time = data$Y, status = data$delta, cluster_id = data$cluster_id,
+      # Z = Z, X = data$X, s_grid = s_grid,
+      # K = K_s_fit, basis_type = bs_s_fit,
+      # lambda_init = 1, A_lambda = 1, B_lambda = 1,
+      # var_gamma = 100,
+      # A_tau2 = 3, B_tau2 = 2,
+      # A_sigma2 = 3, B_sigma2 = 2,
+      # n_iter = n_iter_fit, n_burn = n_burn_fit, n_thin = 1, verbose = FALSE
+    # )
+    # ts_ni   <- toc(quiet = TRUE)
+    # time_ni <- ts_ni$toc - ts_ni$tic
+#
+    # # --- beta_hat(s) on the evaluation grid, held constant across age ---
+    # # Rebuild the sampler's own smooth on s_grid, then evaluate at s_eval.
+    # sm_ni <- smoothCon(s(s_grid, k = K_s_fit, bs = bs_s_fit),
+                       # data = data.frame(s_grid = s_grid), absorb.cons = FALSE)[[1]]
+    # Phi_ni <- PredictMat(sm_ni, data.frame(s_grid = s_eval))   # n_eval_s x K
+    # stopifnot(ncol(Phi_ni) == ncol(fit_ni$b))
+#
+    # beta_ni_draws <- fit_ni$b %*% t(Phi_ni)                    # S x n_eval_s
+    # ni_beta_mean  <- colMeans(beta_ni_draws)
+    # ni_beta_q025  <- apply(beta_ni_draws, 2, quantile, 0.025, na.rm = TRUE)
+    # ni_beta_q975  <- apply(beta_ni_draws, 2, quantile, 0.975, na.rm = TRUE)
+#
+    # # Band on the n_eval_s distinct columns, not the broadcast grid: duplicated
+    # # columns change neither a per-column mean/sd nor a maximum, so qd and the
+    # # band are identical without allocating the S x n_grid matrix.
+    # cma_ni            <- cma_band(beta_ni_draws, level = 0.95)
+    # ni_beta_sd        <- apply(beta_ni_draws, 2, sd)
+#
+    # # Broadcast along age (summaries only — never the S x n_grid draw matrix)
+    # s_idx           <- match(grid_df$s_grid, s_eval)
+    # ni_surface_mean <- ni_beta_mean[s_idx]
+    # ni_surface_q025 <- ni_beta_q025[s_idx]
+    # ni_surface_q975 <- ni_beta_q975[s_idx]
+#
+    # ni_beta_cover_sim <- all(beta_true_grid >= cma_ni$lower[s_idx] &
+                             # beta_true_grid <= cma_ni$upper[s_idx])
+    # ni_beta_cma_qd    <- cma_ni$qd
+#
+    # ni_resid          <- ni_surface_mean - beta_true_grid
+    # ni_beta_ise       <- mean(ni_resid^2)
+    # ni_beta_ise_rel   <- ni_beta_ise / beta_true_ss
+    # ni_beta_bias_mean <- mean(ni_resid)
+    # ni_beta_bias_max  <- max(abs(ni_resid))
+    # ni_beta_cover_pw  <- mean((beta_true_grid >= ni_surface_q025) &
+                              # (beta_true_grid <= ni_surface_q975))
+#
+    # # --- scalar parameters, against the same targets ---
+    # ni_gamma_est   <- colMeans(fit_ni$gamma)
+    # ni_gamma_bias  <- ni_gamma_est - gamma_implied
+    # ni_gamma_se    <- (ni_gamma_est - gamma_implied)^2
+    # q_ni_gamma     <- apply(fit_ni$gamma, 2, quantile, probs = c(0.025, 0.975), na.rm = TRUE)
+    # ni_gamma_cover <- (gamma_implied >= q_ni_gamma[1, ]) & (gamma_implied <= q_ni_gamma[2, ])
+#
+    # ni_tau2_est   <- mean(fit_ni$tau2)
+    # ni_tau2_bias  <- ni_tau2_est - tau2_implied
+    # ni_tau2_se    <- (ni_tau2_est - tau2_implied)^2
+    # ni_tau2_cover <- (tau2_implied >= quantile(fit_ni$tau2, 0.025)) &
+      # (tau2_implied <= quantile(fit_ni$tau2, 0.975))
+#
+    # ni_sigma2_est   <- mean(fit_ni$sigma2)
+    # ni_sigma2_bias  <- ni_sigma2_est - sigma2_true
+    # ni_sigma2_se    <- (ni_sigma2_est - sigma2_true)^2
+    # ni_sigma2_cover <- (sigma2_true >= quantile(fit_ni$sigma2, 0.025)) &
+      # (sigma2_true <= quantile(fit_ni$sigma2, 0.975))
+#
+    # # --- predictive: same test sets, same horizons, same risk-score convention ---
+    # ni_pred_marg <- {
+      # lk <- predict_gibbs_frailty(fit_ni, X_new = test_data$X, Z_new = Z_test,
+              # cluster_id_new = NULL, type = "link", level = 0.95, quantiles = FALSE)
+      # sv <- predict_gibbs_frailty(fit_ni, X_new = test_data$X, Z_new = Z_test,
+              # cluster_id_new = NULL, type = "survival", times = tgrid,
+              # level = 0.95, quantiles = FALSE)
+      # c(c_index = survAUC::UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_test,
+                                # lpnew = -lk$mean, time = tau_eval),
+        # ibs = as.numeric(cal_IPCW_Brier(sv$mean, test_data$Y, test_data$delta,
+                                        # data$Y, data$delta, tgrid,
+                                        # G_data = "test", eps_G = eps_G)))
+    # }
+#
+    # eval_known_ni <- function(cid) {
+      # lk <- predict_gibbs_frailty(fit_ni, X_new = known_data$X, Z_new = Z_known,
+              # cluster_id_new = cid, type = "link", level = 0.95, quantiles = FALSE)
+      # sv <- predict_gibbs_frailty(fit_ni, X_new = known_data$X, Z_new = Z_known,
+              # cluster_id_new = cid, type = "survival", times = tgrid_known,
+              # level = 0.95, quantiles = FALSE)
+      # c(c_index = survAUC::UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_known,
+                                # lpnew = -lk$mean, time = tau_known),
+        # ibs = as.numeric(cal_IPCW_Brier(sv$mean, known_data$Y, known_data$delta,
+                                        # data$Y, data$delta, tgrid_known,
+                                        # G_data = "test", eps_G = eps_G)))
+    # }
+    # ni_cond <- eval_known_ni(known_data$cluster_id)
+    # ni_marg <- eval_known_ni(NULL)
 
     ###############################################################
     ## assemble surface data frame  (n_grid rows, one per eval point)
     ###############################################################
     
-    # Rows for the surface matrices.  The comparator is stored at its native
-    # n_eval_s resolution, not broadcast along age.
+    # # Rows for the surface matrices.  The comparator is stored at its native
+    # # n_eval_s resolution, not broadcast along age.
     surface_row <- list(mean = surface_mean, sd = surface_sd,
                         q025 = surface_q025, q975 = surface_q975)
-    ni_row      <- list(mean = ni_beta_mean, sd = ni_beta_sd,
-                        q025 = ni_beta_q025, q975 = ni_beta_q975)
+    # ni_row      <- list(mean = ni_beta_mean, sd = ni_beta_sd,
+                        # q025 = ni_beta_q025, q975 = ni_beta_q975)
     
     ###############################################################
     ## assemble one-row result data frames
@@ -755,31 +756,31 @@ for(iter in 1:N_iter){
       # diagnostics: a collapsed risk score drives Uno's C to 0 via ties, so
       # record enough to spot it instead of silently averaging it in
       risk_sd       = sd(risk_score),
-      risk_n_unique = length(unique(risk_score)),
-      # ---- no-interaction comparator, beta(s) instead of beta(s, age) ----
-      # Same data, same priors, same grid, same test sets and same targets, so
-      # each ni_* pairs directly with the column of the same name above.
-      ni_beta_ise       = ni_beta_ise,
-      ni_beta_ise_rel   = ni_beta_ise_rel,
-      ni_beta_bias_mean = ni_beta_bias_mean,
-      ni_beta_bias_max  = ni_beta_bias_max,
-      ni_beta_cover_pw  = ni_beta_cover_pw,
-      ni_beta_cover_sim = ni_beta_cover_sim,
-      ni_beta_cma_qd    = ni_beta_cma_qd,
-      ni_tau2_est       = ni_tau2_est,
-      ni_tau2_bias      = ni_tau2_bias,
-      ni_tau2_se        = ni_tau2_se,
-      ni_tau2_cover     = ni_tau2_cover,
-      ni_sigma2_est     = ni_sigma2_est,
-      ni_sigma2_bias    = ni_sigma2_bias,
-      ni_sigma2_se      = ni_sigma2_se,
-      ni_sigma2_cover   = ni_sigma2_cover,
-      ni_c_index             = ni_pred_marg[["c_index"]],
-      ni_ibs                 = ni_pred_marg[["ibs"]],
-      ni_c_index_known       = ni_cond[["c_index"]],
-      ni_ibs_known           = ni_cond[["ibs"]],
-      ni_c_index_known_marg  = ni_marg[["c_index"]],
-      ni_ibs_known_marg      = ni_marg[["ibs"]]
+      risk_n_unique = length(unique(risk_score))
+      # # ---- no-interaction comparator, beta(s) instead of beta(s, age) ----
+      # # Same data, same priors, same grid, same test sets and same targets, so
+      # # each ni_* pairs directly with the column of the same name above.
+      # ni_beta_ise       = ni_beta_ise,
+      # ni_beta_ise_rel   = ni_beta_ise_rel,
+      # ni_beta_bias_mean = ni_beta_bias_mean,
+      # ni_beta_bias_max  = ni_beta_bias_max,
+      # ni_beta_cover_pw  = ni_beta_cover_pw,
+      # ni_beta_cover_sim = ni_beta_cover_sim,
+      # ni_beta_cma_qd    = ni_beta_cma_qd,
+      # ni_tau2_est       = ni_tau2_est,
+      # ni_tau2_bias      = ni_tau2_bias,
+      # ni_tau2_se        = ni_tau2_se,
+      # ni_tau2_cover     = ni_tau2_cover,
+      # ni_sigma2_est     = ni_sigma2_est,
+      # ni_sigma2_bias    = ni_sigma2_bias,
+      # ni_sigma2_se      = ni_sigma2_se,
+      # ni_sigma2_cover   = ni_sigma2_cover,
+      # ni_c_index             = ni_pred_marg[["c_index"]],
+      # ni_ibs                 = ni_pred_marg[["ibs"]],
+      # ni_c_index_known       = ni_cond[["c_index"]],
+      # ni_ibs_known           = ni_cond[["ibs"]],
+      # ni_c_index_known_marg  = ni_marg[["c_index"]],
+      # ni_ibs_known_marg      = ni_marg[["ibs"]]
     )
     
     # gamma columns added dynamically (intercept = index 0, Z1 = 1, Z2 = 2)
@@ -792,10 +793,10 @@ for(iter in 1:N_iter){
     df_coef[paste0("gamma_bias_",    idx)] <- as.list(gamma_bias)
     df_coef[paste0("gamma_se_",      idx)] <- as.list(gamma_se)
     df_coef[paste0("gamma_cover_",   idx)] <- as.list(gamma_cover)
-    df_coef[paste0("ni_gamma_est_",   idx)] <- as.list(ni_gamma_est)
-    df_coef[paste0("ni_gamma_bias_",  idx)] <- as.list(ni_gamma_bias)
-    df_coef[paste0("ni_gamma_se_",    idx)] <- as.list(ni_gamma_se)
-    df_coef[paste0("ni_gamma_cover_", idx)] <- as.list(ni_gamma_cover)
+    # df_coef[paste0("ni_gamma_est_",   idx)] <- as.list(ni_gamma_est)
+    # df_coef[paste0("ni_gamma_bias_",  idx)] <- as.list(ni_gamma_bias)
+    # df_coef[paste0("ni_gamma_se_",    idx)] <- as.list(ni_gamma_se)
+    # df_coef[paste0("ni_gamma_cover_", idx)] <- as.list(ni_gamma_cover)
     
     # ---- run-level info ----
     df_info <- data.frame(
@@ -814,12 +815,12 @@ for(iter in 1:N_iter){
       rho         = rho_dgm,    # Weibull shape used by the Cox DGM (NA otherwise)
       censor_rate = censor_rate,
       event_rate  = mean(data$delta),
-      time        = time,      # Gibbs seconds, interaction model
-      time_ni     = time_ni    # Gibbs seconds, no-interaction comparator
+      time        = time # Gibbs seconds, interaction model
+      # time_ni     = time_ni    # Gibbs seconds, no-interaction comparator
     )
     
     list(info = df_info, coef = df_coef,
-         surface_row = surface_row, ni_row = ni_row)
+         surface_row = surface_row)
     
   }, error = function(e) {
     warning(sprintf(
@@ -833,7 +834,7 @@ for(iter in 1:N_iter){
     info_list[[iter]] <- res$info
     coef_list[[iter]] <- res$coef
     for (k in names(surf))    surf[[k]][iter, ]    <- res$surface_row[[k]]
-    for (k in names(ni_surf)) ni_surf[[k]][iter, ] <- res$ni_row[[k]]
+    # for (k in names(ni_surf)) ni_surf[[k]][iter, ] <- res$ni_row[[k]]
   }
 } # end for loop
 
@@ -849,8 +850,8 @@ result <- list(
                           age_scaled = a_grid_scaled,
                           beta_true  = beta_true_grid),
   s_eval     = s_eval,
-  surface    = surf,
-  ni_surface = ni_surf
+  surface    = surf
+  # ni_surface = ni_surf
 )
 
 ###############################################################

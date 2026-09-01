@@ -1,410 +1,576 @@
 ---
-title: "Simulation Results Interaction"
+title: "Functional Frailty AFT with a Bivariate Surface — Simulation Report"
 author: "Weijia Qian"
 date: '`r format(Sys.time(), "%Y-%m-%d")`'
 output:
-  html_document: 
+  html_document:
     code_folding: hide
     toc: true
     toc_float: true
+    number_sections: true
+    fig_width: 11
+    fig_height: 7
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, repr.plot.width = 12, repr.plot.height = 8)
-library(CCMHr)
-library(gt)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", dpi = 150)
 library(kableExtra)
-library(MASS)
-library(patchwork)
-library(purrr)
-library(refund)
-library(scam)
-library(splines)
+library(RColorBrewer)
 library(tidyverse)
 
-theme_set(theme_bw() + 
-            theme(legend.position = "bottom",
-                  ))
-# theme(axis.text = element_text(size = 15),
-#         axis.title = element_text(size = 15),
-#         axis.text.x = element_blank(),
-#         axis.ticks.x = element_blank(),
-#         legend.position = "bottom",
-#         legend.box.margin = margin(t = -20, b = 0),
-#         legend.title = element_text(size = 15),
-#         legend.text = element_text(size = 15))
-
-# Define a custom color palette for the methods
-my_colors <- c(
-  "FTTM" = "#440154",
-  # "mgcv LFCM" = "#414487",
-  "LFCM" = "#2A788E",
-  "loglogistic lfAFT" = "#7AD151",
-  "lognormal lfAFT" = "#FDE725"
+theme_set(
+  theme_bw(base_size = 12) +
+    theme(legend.position   = "bottom",
+          panel.grid.minor  = element_blank(),
+          strip.background  = element_rect(fill = "grey92", colour = NA),
+          strip.text        = element_text(face = "bold", size = 10))
 )
-fig_dir <- "/Users/weijia/Research/Frailty/analysis/figures"
 
-folder_path <- "/Users/weijia/Research/Frailty/outputs/20260515"
-rda_files <- list.files(path = folder_path, pattern = "\\.RDA$", full.names = TRUE)
-all_results <- list()
-for (i in 1:length(rda_files)) {
-  all_results[[i]] <- loadRDa(rda_files[[i]])
+set2 <- brewer.pal(8, "Set2")
+model_cols <- c("Interaction β(s,a)"  = set2[1],
+                "No interaction β(s)" = set2[2])
+
+# For the predictive figures each model appears twice (marginal / conditional),
+# so the second evaluation reuses the model's hue at 60% luminance: same colour
+# family, still separable.
+shade <- function(hex, f) {
+  m <- col2rgb(hex) * f
+  rgb(m[1], m[2], m[3], maxColorValue = 255)
 }
+pred_cols <- c(
+  "Interaction β(s,a) — marginal (u = 0)"     = model_cols[[1]],
+  "Interaction β(s,a) — conditional (û)"      = shade(model_cols[[1]], 0.60),
+  "No interaction β(s) — marginal (u = 0)"    = model_cols[[2]],
+  "No interaction β(s) — conditional (û)"     = shade(model_cols[[2]], 0.60)
+)
+
+results_dir <- here::here("outputs", "20260826")
+fig_dir     <- here::here("analysis", "figures")
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
 ```
 
-### Computation Time
-```{r}
-all_info <- data.frame()
-# Loop through all scenarios and iterations to extract 'info'
-for (scenario in all_results) {
-    all_info <- rbind(all_info, scenario $info)
-}
+```{r load-data, cache=TRUE, cache.extra=tools::md5sum(list.files(results_dir, full.names=TRUE)[1])}
+# Each .RDA holds list(info, coef, grid, s_eval, surface, ni_surface).  Only
+# info and coef are needed here; the surface matrices are left on disk.
+load_result <- function(path) { e <- new.env(); load(path, envir = e); e$result }
 
-
-# plot_time <- all_info %>%
-#   ggplot(aes(factor(tau), time)) + 
-#   geom_boxplot(fatten = 1.3) +
-#   facet_grid(family~n_cluster, labeller = labeller(n_cluster = label_both, family = label_value), scales = "free") +
-#   labs(x = expression(tau), y = "Computation Time")
-# plot_time
-# ggsave(file.path(fig_dir, "fig_sim_brier.jpeg"), plot_linear_Brier, width = 6, height = 4, dpi = 500)
-
-```
-
-### MISE for Estimated Coefficient Functions Across Iterations
-```{r}
-all_coef <- data.frame() 
-
-# Loop through all scenarios and iterations to extract 'coef'
-for (scenario in all_results) {
-  tmp_data <- cbind(scenario$info, scenario$coef)
-  all_coef <- rbind(all_coef, tmp_data)
-}
-
-table_coef <- all_coef %>%
-  group_by(beta_type, family, n_cluster, tau, sigma, censor_rate) %>%
-  summarise(beta_mise = mean(beta_ise),
-            beta_bias_mean = mean(beta_bias_mean),
-            beta_bias_max = mean(beta_bias_max),
-            beta_cover_mean = mean(beta_cover_pw),
-            tau2_mean_bias = mean(tau2_bias),
-            tau2_mse = mean(tau2_se),
-            tau2_mean_cover = mean(tau2_cover),
-            sigma2_mean_bias = mean(sigma2_bias),
-            sigma2_mse = mean(sigma2_se),
-            sigma2_mean_cover = mean(sigma2_cover)
-            )
-
-# table_beta_bias <- all_coef %>%
-#   group_by(beta_type, family, n_cluster, tau, sigma, censor_rate) %>%
-#   summarise(
-#     across(
-#       starts_with("beta_bias_"),
-#       ~ mean(.x, na.rm = TRUE)
-#     ),
-#     .groups = "drop"
-#   )  %>%
-#   pivot_longer(
-#     cols = starts_with("beta_bias_"),
-#     names_to = "beta_index",
-#     values_to = "bias"
-#   ) %>%
-#   mutate(
-#     beta_index = as.integer(gsub("beta_bias_", "", beta_index))
-#   )
-# 
-# plot_beta_bias <- table_beta_bias %>%
-#   filter(tau == 2) %>%
-#   ggplot(aes(x = beta_index, y = bias, color = factor(sigma), group = sigma)) +
-#   geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.4) +
-#   geom_line(linewidth = 0.7) +
-#   # geom_point(size = 2) +
-#   facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-#   labs(
-#     x = "Function index",
-#     y = expression("Bias of"~beta(s)),
-#     color = expression(sigma)
-#   )
-# plot_beta_bias
-
-# Box plot: MISE of beta(s)
-plot_beta_mise <- all_coef %>%
-  filter(beta_type == "additive") %>%
-  split(.$family) %>%
-  map(~{
-    
-    fam_name <- unique(.x$family)
-    
-    ggplot(.x, aes(factor(n_cluster), beta_ise)) +
-      geom_boxplot(fatten = 1.3) +
-      facet_grid(
-        censor_rate ~ tau,
-        labeller = labeller(
-          censor_rate = label_both,
-          tau = label_both
-        )
-      ) +
-      labs(
-        x = "Number of clusters",
-        y = expression("MISE of" ~ beta(s)),
-        subtitle = paste("family =", fam_name,
-                         ", beta_type = additive")
-      )
-  })
-
-iwalk(plot_beta_mise, ~{
-  ggsave(
-    filename = paste0(fig_dir, "/plot_beta_mise_", .y, ".png"),
-    plot = .x,
-    width = 10,
-    height = 6,
-    dpi = 300
-  )
+rda_files <- list.files(results_dir, pattern = "\\.RDA$", full.names = TRUE)
+raw <- map_dfr(rda_files, function(p) {
+  r <- load_result(p)
+  cbind(r$info[, setdiff(names(r$info), "seed")], r$coef)
 })
 
-# plot_beta_mise <- all_coef %>%
-#   filter(family == "lognormal", beta_type == "additive") %>%
-#   ggplot(aes(factor(n_cluster), beta_ise)) +
-#   geom_boxplot(fatten = 1.3) +
-#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-#   facet_grid(censor_rate~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-#   labs(x = "Number of clusters", y = expression("MISE of"~beta(s)),
-#        subtitle = "family = lognormal, beta_type = additive")
-# plot_beta_mise
+# Metrics that exist for BOTH models (the comparator carries an ni_ prefix).
+paired_metrics <- c(
+  "beta_ise", "beta_ise_rel", "beta_bias_mean", "beta_bias_max",
+  "beta_cover_pw", "beta_cover_sim", "beta_cma_qd",
+  "tau2_est", "tau2_bias", "tau2_se", "tau2_cover",
+  "sigma2_est", "sigma2_bias", "sigma2_se", "sigma2_cover",
+  "c_index", "ibs", "c_index_known", "ibs_known",
+  "c_index_known_marg", "ibs_known_marg"
+)
+design_cols <- c("scenario", "iter", "family", "N_total", "n_cluster", "nS",
+                 "beta_type", "tau", "tau_dgm", "sigma", "sigma_dgm", "rho",
+                 "censor_rate", "event_rate", "time", "time_ni")
 
-# Bar plot: coverage of beta(s)
-plot_beta_cover <- all_coef %>%
-  filter(beta_type == "additive") %>%
-  split(.$family) %>%
-  map(~{
-    
-    fam_name <- unique(.x$family)
-    
-    ggplot(.x, aes(factor(n_cluster), beta_cover_pw)) + 
-      geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-      geom_hline(yintercept = 0.95, color = "red",lty = "dashed") +
-      facet_grid(censor_rate ~ tau, labeller = labeller(censor_rate = label_both,tau = label_both)) +
-      labs(
-        x = "Number of clusters",
-        y = expression("Coverage of 95% CI for" ~ beta(s)),
-        subtitle = paste("family =", fam_name, ", beta_type = additive"))
-    })
-
-iwalk(plot_beta_cover, ~{
-  ggsave(
-    filename = paste0(fig_dir, "/plot_beta_cover_", .y, ".png"),
-    plot = .x,
-    width = 10,
-    height = 6,
-    dpi = 300
+# Long by model, so every figure is one geom with a colour aesthetic.
+dat <- bind_rows(
+  raw |> select(all_of(design_cols), all_of(paired_metrics)) |>
+    mutate(model = "Interaction β(s,a)"),
+  raw |> select(all_of(design_cols), all_of(paste0("ni_", paired_metrics))) |>
+    rename_with(~ sub("^ni_", "", .x), starts_with("ni_")) |>
+    mutate(model = "No interaction β(s)")
+) |>
+  mutate(
+    model  = factor(model, levels = names(model_cols)),
+    family = factor(family, levels = c("lognormal", "loglogistic", "cox"),
+                    labels = c("lognormal\n(correctly specified)",
+                               "loglogistic\n(heavy tails)",
+                               "Cox / Weibull PH\n(skewed)")),
+    censor_lab = factor(paste0(100 * censor_rate, "% censoring"),
+                        levels = paste0(100 * c(0.25, 0.5, 0.75), "% censoring")),
+    tau_f = factor(tau)
   )
+
+# Figures below use this subset.
+sub <- dat |> filter(n_cluster == 50, beta_type == "additive")
+```
+
+```{r load-surfaces, cache=TRUE, dependson="load-data"}
+# The fitted surfaces themselves, for the estimated-surface figure.  Only the
+# n_cluster = 50 scenarios are read (81 of 243 files), and only the posterior
+# mean averaged over replicates is kept -- the full matrices stay on disk.
+scen50 <- raw |> filter(n_cluster == 50) |> distinct(scenario) |> pull(scenario)
+
+surf_dat <- map_dfr(scen50, function(sc) {
+  r <- load_result(file.path(results_dir, paste0(sc, ".RDA")))
+  i <- r$info[1, ]
+  tibble(family = i$family, beta_type = i$beta_type,
+         tau = i$tau, censor_rate = i$censor_rate,
+         s = r$grid$s, age = r$grid$age, beta_true = r$grid$beta_true,
+         est_int = colMeans(r$surface$mean),
+         est_ni  = colMeans(r$ni_surface$mean)[match(r$grid$s, r$s_eval)])
 })
-
-plot_beta_cover <- all_coef %>%
-  filter(beta_type == "additive" & censor_rate == 0.25) %>%
-  ggplot(aes(factor(n_cluster), beta_cover_pw)) + 
-  geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-  geom_hline(yintercept = 0.95, color = "red", lty = "dashed") +
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-  labs(x = "Number of clusters", y = expression("Coverage of 95% CI for"~beta(s)),
-       subtitle = "beta_type = additive, censor_rate = 0.25")
-plot_beta_cover
 ```
 
+# Simulation settings
 
-```{r tau2}
-# Box plot: bias of tau2
-plot_tau2_bias <- all_coef %>%
-  filter(beta_type == "additive") %>%
-  split(.$family) %>%
-  map(~{
-    
-    fam_name <- unique(.x$family)
-    
-    ggplot(.x, aes(factor(n_cluster), tau2_bias)) +
-      geom_boxplot(fatten = 1.3) +
-      geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-      facet_grid(censor_rate ~ tau, labeller = labeller(censor_rate = label_both, tau = label_both)) +
-      labs(
-        x = "Number of clusters",
-        y = expression("Bias of"~tau^2),
-        subtitle = paste("family =", fam_name,
-                         ", beta_type = additive")
-      )
+```{r tbl-settings}
+grid_levels <- function(v) paste(sort(unique(raw[[v]])), collapse = ", ")
+
+tibble::tribble(
+  ~Element, ~Setting, ~Note,
+  "Families (DGM)", "lognormal, loglogistic, Cox (Weibull PH)",
+    "Error shape only; variance and signal matched across arms",
+  "Coefficient surfaces", grid_levels("beta_type"),
+    "additive s+a; bilinear 2sa; ridge exp(-6(s-a)^2)",
+  "Clusters J", grid_levels("n_cluster"), "Total N fixed at 4000",
+  "Frailty SD τ", grid_levels("tau"), "AFT (log-time) scale, common to all families",
+  "Censoring rate", grid_levels("censor_rate"), "C ~ Uniform(0, ub), ub solved to hit the target",
+  "Residual SD σ", grid_levels("sigma"),
+    "Log-time residual SD target; each DGM takes a different scale parameter",
+  "Sample size", grid_levels("N_total"), "Cluster sizes ~ Uniform(mean±0.5·mean)",
+  "Functional grid nS", grid_levels("nS"), "X(s) via Karhunen-Loève, Fourier basis, decay k^-0.7",
+  "Scenarios", as.character(n_distinct(raw$scenario)), "3 families x 3 J x 3 surfaces x 3 τ x 3 censoring",
+  "Iterations per scenario", as.character(nrow(raw) / n_distinct(raw$scenario)), "All scenarios completed",
+  "Test sets", "N = 1000 marginal (new clusters), N = 1000 conditional (known clusters)",
+    "Marginal set fixed within a scenario; conditional set redrawn each iteration",
+  "MCMC", "20,000 iterations, 10,000 burn-in, no thinning", "Identical for both models",
+  "Priors", "γ ~ N(0,100); σ², τ² ~ IG(3,2); λ ~ Gamma(1,1)", "Identical for both models"
+) |>
+ kbl() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+```{r tbl-timing, include=FALSE}
+raw |>
+  summarise(across(c(time, time_ni), list(median = median, max = max))) |>
+  mutate(total_cpu_hours = sum(raw$time + raw$time_ni) / 3600) |>
+  kbl(digits = 1, caption = "Sampler wall-clock seconds per fit (time = interaction, time_ni = comparator).") |>
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+# Models compared
+
+```{r tbl-models}
+tibble::tribble(
+  ~Feature, ~`Interaction model`, ~`No-interaction model`,
+  "Functional effect", "∫ X(s) β(s, age) ds", "∫ X(s) β(s) ds",
+  "Basis", "Tensor product te(s, age), K_s = 15, K_age = 10, cubic regression",
+    "Marginal spline in s only, K = 15, cubic regression (the tensor's s-margin)",
+  "Smoothing parameters", "λ₁ (s), λ₂ (age), both Gamma(1,1)", "λ, Gamma(1,1)",
+  # "Cluster frailty", "u_j ~ N(0, τ²), shared", "u_j ~ N(0, τ²), shared",
+  # "Error", "Gaussian working error, σ² ~ IG(3,2)", "Gaussian working error, σ² ~ IG(3,2)",
+  # "Censoring", "Data augmentation, truncated normal", "Data augmentation, truncated normal",
+  # "Fitted to", "The same training data", "The same training data",
+  # "Scored on", "The same grid, test sets and targets", "β̂(s) broadcast along age",
+  "Implementation", "gibbs_frailty_interaction()", "gibbs_functional_frailty()"
+) |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+# Evaluation metrics
+
+## Scoring the Cox arm on the AFT scale
+
+For the Cox DGM, inverting the Weibull baseline
+$h_0(t)=\lambda_0\rho t^{\rho-1}$ with $T=\{E/(\lambda_0 e^{\eta})\}^{1/\rho}$,
+$E\sim\mathrm{Exp}(1)$, gives
+
+$$\log T \;=\; -\frac{\log\lambda_0}{\rho} \;-\; \frac{\eta_{\text{Cox}}}{\rho}
+\;-\; \frac{u_j}{\rho} \;+\; \frac{\log E}{\rho},$$
+
+so every effect maps to log time by division by $-\rho$, where $\rho$ is the Weibull shape parameter 
+($\rho = 1$ gives a constant hazard (exponential), $\rho > 1$ a rising one, $\rho < 1$ a falling one).
+
+The log-time error is $(\log E)/\rho \sim \mathrm{Gumbel\_min}(0,1)/\rho$, so 
+$\sigma^2_{AFT} = \pi^2 / (6\rho^2)$.
+
+The DGM is specified at $\rho\beta$, $\rho\gamma$ and $\rho\tau$, so that after the
+transform the Cox arm sits at exactly the same signal and noise as the AFT arms.
+
+```{r tbl-cox-transform}
+cx <- raw |> filter(family == "cox", beta_type == "additive", n_cluster == 50) |> slice(1)
+ln <- raw |> filter(family == "lognormal", beta_type == "additive", n_cluster == 50,
+                    tau == cx$tau) |> slice(1)
+
+tibble::tribble(
+  ~Quantity, ~`Cox DGM (log-hazard)`, ~Transform, ~`AFT target (log-time)`,
+  "β(s, a)", "ρ · β(s,a)", "−β_Cox / ρ", "−β(s,a)",
+  "γ₁ (slope)", sprintf("%.4f", cx$gamma_true_1), "−γ_Cox / ρ",
+    sprintf("%.4f", cx$gamma_implied_1), 
+  "γ₀ (intercept)", sprintf("%.4f", cx$gamma_true_0),
+    "−(log λ₀ + γ₀ + γ_EM) / ρ", 
+    sprintf("%.4f", cx$gamma_implied_0),
+  "τ²", sprintf("%.4f", cx$tau2_true), "τ²_Cox / ρ²",
+    sprintf("%.4f", cx$tau2_implied), 
+  "σ²", "—", "π² / (6ρ²)",
+    sprintf("%.4f", cx$sigma2_true), 
+) |>
+  kbl(caption = sprintf(
+    paste("Cox arm at ρ = %.4f, τ = %.1f. The AFT target column is what bias and coverage",
+          "are scored against; it matches the AFT arms by construction, except the intercept."), cx$rho, cx$tau)) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+## Metric definitions
+
+```{r tbl-metrics}
+tibble::tribble(
+  ~Metric, ~Definition, ~Target,
+  "ISE of β(s,a)", "Mean squared deviation from the true surface over a 30x30 (s, age) grid; the mean over iterations is the MISE", "0",
+  "Pointwise coverage", "Fraction of grid points whose true value falls in the 95% pointwise CrI", "0.95",
+  "Simultaneous coverage", "Whether the ENTIRE true surface falls inside the 95% max-statistic band (one 0/1 per iteration)", "0.95",
+  "Bias of τ²", "Posterior mean minus the AFT-scale target τ²_implied", "0",
+  "Coverage of τ²", "Whether τ²_implied falls in the 95% CrI (one 0/1 per iteration)", "0.95",
+  "Bias of σ²", "Posterior mean minus the log-time residual variance", "0",
+  "Coverage of σ²", "Whether σ²_true falls in the 95% CrI (one 0/1 per iteration)", "0.95",
+  "C-index / IBS — new clusters", "`c_index`, `ibs`: new subjects in NEW clusters, frailty = 0 (population-level prediction)", "1 / 0",
+  "C-index / IBS — known clusters, u = 0", "`c_index_known_marg`, `ibs_known_marg`: held-out subjects in KNOWN clusters, frailty still set to 0", "1 / 0",
+  "C-index / IBS — known clusters, û", "`c_index_known`, `ibs_known`: the same held-out subjects, scored with the estimated frailty û_j", "1 / 0",
+) |>
+  kbl(caption = "All estimation metrics are scored on the AFT (log-time) scale.") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+# Additive surface {.tabset}
+
+All figures in this section use **J = 50 clusters** and the **additive** surface
+(`r n_distinct(sub$scenario)` scenarios, `r nrow(sub)/2/n_distinct(sub$scenario)` iterations each).
+Columns are the data-generating family, rows the censoring rate; the y-axis is
+fixed across panels.
+
+```{r fig-helpers}
+box_panel <- function(d, yvar, ylab, hline = NULL, hline_lab = NULL) {
+  p <- ggplot(d, aes(x = tau_f, y = .data[[yvar]], fill = model))
+  if (!is.null(hline))
+    p <- p + geom_hline(yintercept = hline, colour = "red",
+                        linetype = "dotted", linewidth = 0.6)
+  p +
+    geom_boxplot(outlier.size = 0.5, linewidth = 0.35, alpha = 0.85,
+                 position = position_dodge(width = 0.8)) +
+    facet_grid(censor_lab ~ family) +
+    scale_fill_manual(values = model_cols, name = NULL) +
+    labs(x = expression(tau), y = ylab)
+}
+
+# Coverage indicators are 0/1 per iteration, so the informative summary is the
+# rate over iterations with a Clopper-Pearson interval.
+rate_panel <- function(d, cvar, ylab) {
+  s <- d |>
+    group_by(family, censor_lab, tau_f, model) |>
+    summarise(k = sum(.data[[cvar]]), n = n(), .groups = "drop") |>
+    mutate(rate = k / n,
+           lo = if_else(k == 0, 0, qbeta(0.025, k, n - k + 1)),
+           hi = if_else(k == n, 1, qbeta(0.975, k + 1, n - k)))
+  ggplot(s, aes(x = tau_f, y = rate, colour = model)) +
+    geom_hline(yintercept = 0.95, colour = "red", linetype = "dotted", linewidth = 0.6) +
+    geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.18,
+                  position = position_dodge(width = 0.55), linewidth = 0.5) +
+    geom_point(size = 2.2, position = position_dodge(width = 0.55)) +
+    facet_grid(censor_lab ~ family) +
+    scale_colour_manual(values = model_cols, name = NULL) +
+    scale_y_continuous(limits = c(0, 1)) +
+    labs(x = expression(tau), y = ylab)
+}
+
+# Predictive metrics on the KNOWN-cluster test set, scored twice from the same
+# fit and the same held-out subjects: once with the frailty set to 0 (marginal)
+# and once with the estimated frailty u_hat_j (conditional).  Because only the
+# frailty differs, the gap between the two shades is exactly what the frailty
+# contributes -- no confounding from the test sets differing.
+pred_panel <- function(d, marg, cond, ylab, hline = NULL) {
+  s <- d |>
+    select(family, censor_lab, tau_f, model,
+           marginal = all_of(marg), conditional = all_of(cond)) |>
+    pivot_longer(c(marginal, conditional),
+                 names_to = "evaluation", values_to = "value") |>
+    mutate(evaluation = recode(evaluation,
+                               marginal    = "marginal (u = 0)",
+                               conditional = "conditional (û)"),
+           series = factor(paste0(model, " — ", evaluation),
+                           levels = names(pred_cols)))
+  p <- ggplot(s, aes(x = tau_f, y = value, fill = series))
+  if (!is.null(hline))
+    p <- p + geom_hline(yintercept = hline, colour = "red",
+                        linetype = "dotted", linewidth = 0.6)
+  p +
+    geom_boxplot(outlier.size = 0.4, linewidth = 0.3, alpha = 0.9,
+                 position = position_dodge(width = 0.85)) +
+    facet_grid(censor_lab ~ family) +
+    scale_fill_manual(values = pred_cols, name = NULL) +
+    guides(fill = guide_legend(nrow = 2)) +
+    labs(x = expression(tau), y = ylab)
+}
+
+save_fig <- function(p, name, w = 11, h = 7)
+  ggsave(file.path(fig_dir, paste0(name, ".png")), p, width = w, height = h, dpi = 300)
+
+# Estimated surface, shown as slices in s at three ages, all in one panel per
+# family. 
+slice_ages <- function() {
+  a <- sort(unique(surf_dat$age))
+  vapply(c(40, 60, 80), function(x) a[which.min(abs(a - x))], numeric(1))
+}
+
+age_cols <- setNames(brewer.pal(9, "BuGn")[c(5, 7, 9)],   # lightest = Set2 teal
+                     sprintf("age %g", round(slice_ages())))
+slice_cols <- c(age_cols, "no-interaction fit" = unname(model_cols[2]))
+
+surface_slice <- function(bt) {
+  keep   <- slice_ages()
+  fam_lb <- c("lognormal", "loglogistic", "Cox / Weibull PH")
+
+  base <- surf_dat |>
+    filter(beta_type == bt, age %in% keep) |>
+    group_by(family, s, age) |>                      # average over tau and censoring
+    summarise(across(c(beta_true, est_int, est_ni), mean), .groups = "drop") |>
+    mutate(family = factor(family, c("lognormal", "loglogistic", "cox"), fam_lb),
+           series = factor(sprintf("age %g", round(age)), levels = names(slice_cols)))
+
+  # the comparator is identical at every age, so keep a single curve
+  ni <- base |>
+    filter(age == keep[1]) |>
+    mutate(series = factor("no-interaction fit", levels = names(slice_cols)))
+
+  ggplot(mapping = aes(s, colour = series)) +
+    geom_line(data = base, aes(y = beta_true, group = series),
+              linetype = "dotted", linewidth = 0.9) +
+    geom_line(data = base, aes(y = est_int, group = series), linewidth = 1) +
+    geom_line(data = ni, aes(y = est_ni, group = series), linewidth = 1) +
+    facet_wrap(~ family, nrow = 1, scales = "free_y") +
+    scale_colour_manual(values = slice_cols, name = NULL) +
+    labs(x = "s", y = expression(hat(beta)(s, a)),
+         subtitle = paste0(
+           "Dotted = truth at each age; solid = posterior mean averaged over 100 replicates ",
+           "and all tau /\ncensoring levels (J = 50).  The no-interaction fit is one curve, ",
+           "the same at every age.\nThe Cox AFT surface is negative by construction."))
+}
+
+# One builder for the nine figures, so the three surfaces stay in sync.
+# Returns a named list; names double as the section headings.
+fig_keys   <- c("mise_beta", "cover_pointwise_beta", "cover_simultaneous_beta",
+                "bias_tau2", "cover_tau2", "bias_sigma2", "cover_sigma2",
+                "c_index", "ibs", "surface_fit")
+fig_widths <- c(rep(11, 7), 13, 13, 12)
+fig_heights<- c(rep(7, 9), 4.6)
+
+surface_figures <- function(bt, save = TRUE) {
+  d   <- dat |> filter(n_cluster == 50, beta_type == bt)
+  lab <- sprintf("J = 50, %s surface", bt)
+  fs <- list(
+    "1. ISE of the surface" =
+      box_panel(d, "beta_ise", expression("ISE of " * beta(s, a))) +
+        labs(subtitle = paste0(lab, ". Mean over iterations = MISE.")),
+    "2. Pointwise coverage" =
+      box_panel(d, "beta_cover_pw",
+                expression("Pointwise 95% CrI coverage of " * beta(s, a)), hline = 0.95) +
+        labs(subtitle = "Fraction of the 900 grid points covered, per iteration. Red: nominal 0.95."),
+    "3. Simultaneous coverage" =
+      rate_panel(d, "beta_cover_sim",
+                 expression("Simultaneous 95% coverage of " * beta(s, a))) +
+        labs(subtitle = "Whole-surface coverage rate over 100 iterations. Red: nominal 0.95."),
+    "4. Bias of $\\tau^2$" =
+      box_panel(d, "tau2_bias", expression("Bias of " * tau^2), hline = 0) +
+        labs(subtitle = "Posterior mean minus the AFT-scale target. Red: zero bias."),
+    "5. Coverage of $\\tau^2$" =
+      rate_panel(d, "tau2_cover", expression("95% CrI coverage of " * tau^2)) +
+        labs(subtitle = "Coverage rate over 100 iterations. Red: nominal 0.95."),
+    "6. Bias of $\\sigma^2$" =
+      box_panel(d, "sigma2_bias", expression("Bias of " * sigma^2), hline = 0) +
+        labs(subtitle = "Posterior mean minus the log-time residual variance. Red: zero bias."),
+    "7. Coverage of $\\sigma^2$" =
+      rate_panel(d, "sigma2_cover", expression("95% CrI coverage of " * sigma^2)) +
+        labs(subtitle = "Coverage rate over 100 iterations. Red: nominal 0.95."),
+    "8. C-index" =
+      pred_panel(d, "c_index_known_marg", "c_index_known", "Uno's IPCW C-index") +
+        labs(subtitle = "Known-cluster test set: frailty set to 0 vs frailty set to û_j."),
+    "9. Integrated Brier score" =
+      pred_panel(d, "ibs_known_marg", "ibs_known",
+                 "IPCW integrated Brier score", hline = 0) +
+        labs(subtitle = "Known-cluster test set: frailty 0 vs û_j. Red: zero (perfect prediction)."),
+    "10. Estimated surface" = surface_slice(bt)
+  )
+  if (save)
+    walk(seq_along(fs), ~ save_fig(fs[[.x]],
+         sprintf("fig%d_%s_%s", .x, fig_keys[.x], bt),
+         w = fig_widths[.x], h = fig_heights[.x]))
+  fs
+}
+
+# Emit a run of figures under their own headings (used by the bilinear and
+# ridge sections, which do not need per-figure prose).
+emit_figures <- function(fs, idx, level = "##") {
+  walk(idx, function(i) {
+    cat("\n\n", level, " ", names(fs)[i], "\n\n", sep = "")
+    print(fs[[i]])
+    cat("\n\n")
   })
+}
 
-iwalk(plot_tau2_bias, ~{
-  ggsave(filename = paste0(fig_dir, "/plot_tau2_bias_", .y, ".png"),
-         plot = .x, width = 10, height = 6, dpi = 300)})
+summary_table <- function(bt) {
+  dat |>
+    filter(n_cluster == 50, beta_type == bt) |>
+    group_by(censor_lab, family, model) |>
+    summarise(
+      ISE            = mean(beta_ise),
+      `Cover pw`     = mean(beta_cover_pw),
+      `Cover sim`    = mean(beta_cover_sim),
+      `Bias tau2`    = mean(tau2_bias),
+      `Cover tau2`   = mean(tau2_cover),
+      `Bias sigma2`  = mean(sigma2_bias),
+      `Cover sigma2` = mean(sigma2_cover),
+      `C new clust`  = mean(c_index),
+      `C known u=0`  = mean(c_index_known_marg),
+      `C known û`    = mean(c_index_known),
+      `IBS known u=0`= mean(ibs_known_marg),
+      `IBS known û`  = mean(ibs_known),
+      .groups = "drop"
+    ) |>
+    kbl(digits = 3,
+        caption = sprintf("Means over tau and iterations, J = 50, %s surface.", bt)) |>
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) |>
+    collapse_rows(columns = 1:2, valign = "top")
+}
 
-# plot_tau2_bias <- all_coef %>%
-#   filter(beta_type == "ridge" & censor_rate == 0.25) %>%
-#   ggplot(aes(factor(n_cluster), tau2_bias)) + 
-#   geom_boxplot(fatten = 1.3) +
-#   geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-#   facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-#   labs(x = "Number of clusters", y = expression("Bias of"~tau^2),
-#        subtitle = "beta_type = ridge, censor_rate = 0.25")
-# plot_tau2_bias
-# 
-# # Box plot: MSE of tau2
-# plot_tau2_mse <- all_coef %>%
-#   filter(sigma == 1) %>%
-#   ggplot(aes(factor(tau), tau2_se)) + 
-#   geom_boxplot(fatten = 1.3) +
-#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-#   facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-#   labs(x = expression(tau), y = expression("MSE of"~tau^2))
-# plot_tau2_mse
-
-# Bar plot: coverage of tau2
-plot_tau2_cover <- all_coef %>%
-  filter(beta_type == "additive") %>%
-  split(.$family) %>%
-  map(~{
-    
-    fam_name <- unique(.x$family)
-    
-    ggplot(.x, aes(factor(n_cluster), as.numeric(tau2_cover))) + 
-      geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-      geom_hline(yintercept = 0.95, color = "red",lty = "dashed") +
-      facet_grid(censor_rate ~ tau, labeller = labeller(censor_rate = label_both,tau = label_both)) +
-      labs(
-        x = "Number of clusters",
-        y = expression("Coverage of 95% CI for" ~ beta(s)),
-        subtitle = paste("family =", fam_name, ", beta_type = additive"))
-    })
-
-iwalk(plot_tau2_cover, ~{
-  ggsave(filename = paste0(fig_dir, "/plot_tau2_cover_", .y, ".png"),
-         plot = .x, width = 10, height = 6, dpi = 300)})
-
-# plot_tau2_cover <- all_coef %>%
-#   filter(beta_type == "bilinear" & censor_rate == 0.25) %>%
-#   ggplot(aes(factor(n_cluster), as.numeric(tau2_cover))) + 
-#   geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-#   geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-#   facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-#   labs(x = "Number of clusters", y = expression("Coverage of 95% CI for"~tau^2),
-#        subtitle = "beta_type = bilinear, censor_rate = 0.25")
-# plot_tau2_cover
+figs_additive <- surface_figures("additive")
+figs_bilinear <- surface_figures("bilinear")
+figs_ridge    <- surface_figures("ridge")
 ```
 
+## 1. ISE of the surface
 
-```{r sigma2}
-# Box plot: bias of sigma2
-plot_sigma2_bias <- all_coef %>%
-  filter(beta_type == "additive") %>%   # cox now has a sigma2 target: pi^2/(6*rho^2)
-  split(.$family) %>%
-  map(~{
-    
-    fam_name <- unique(.x$family)
-    
-    ggplot(.x, aes(factor(n_cluster), sigma2_bias)) +
-      geom_boxplot(fatten = 1.3) +
-      geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-      facet_grid(censor_rate ~ tau, labeller = labeller(censor_rate = label_both, tau = label_both)) +
-      labs(
-        x = "Number of clusters",
-        y = expression("Bias of"~tau^2),
-        subtitle = paste("family =", fam_name,
-                         ", beta_type = additive")
-      )
-  })
-
-iwalk(plot_sigma2_bias, ~{
-  ggsave(filename = paste0(fig_dir, "/plot_sigma2_bias_", .y, ".png"),
-         plot = .x, width = 10, height = 6, dpi = 300)})
-
-# plot_sigma2_bias <- all_coef %>%
-#   filter(beta_type == "bilinear" & censor_rate == 0.25) %>%
-#   ggplot(aes(factor(n_cluster), sigma2_bias)) + 
-#   geom_boxplot(fatten = 1.3) +
-#   geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-#   facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-#   labs(x = "Number of clusters", y = expression("Bias of"~sigma^2),
-#        subtitle = "beta_type = bilinear, censor_rate = 0.25")
-# plot_sigma2_bias
-# 
-# # Box plot: MSE of sigma2
-# plot_sigma2_mse <- all_coef %>%
-#   filter(tau == 1) %>%
-#   ggplot(aes(factor(sigma), sigma2_se)) + 
-#   geom_boxplot(fatten = 1.3) +
-#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-#   facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-#   labs(x = expression(sigma), y = expression("MSE of"~sigma^2))
-# plot_sigma2_mse
-
-# Bar plot: coverage of sigma2
-plot_sigma2_cover <- all_coef %>%
-  filter(beta_type == "additive") %>%   # cox now has a sigma2 target: pi^2/(6*rho^2)
-  split(.$family) %>%
-  map(~{
-    
-    fam_name <- unique(.x$family)
-    
-    ggplot(.x, aes(factor(n_cluster), as.numeric(sigma2_cover))) + 
-      geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-      geom_hline(yintercept = 0.95, color = "red",lty = "dashed") +
-      facet_grid(censor_rate ~ tau, labeller = labeller(censor_rate = label_both,tau = label_both)) +
-      labs(
-        x = "Number of clusters",
-        y = expression("Coverage of 95% CI for" ~ beta(s)),
-        subtitle = paste("family =", fam_name, ", beta_type = additive"))
-    })
-
-iwalk(plot_sigma2_cover, ~{
-  ggsave(filename = paste0(fig_dir, "/plot_sigma2_cover_", .y, ".png"),
-         plot = .x, width = 10, height = 6, dpi = 300)})
-# plot_sigma2_cover <- all_coef %>%
-#   filter(beta_type == "bilinear" & censor_rate == 0.25) %>%
-#   ggplot(aes(factor(n_cluster), as.numeric(sigma2_cover))) + 
-#   geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-#   geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-#   # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-#   facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-#   labs(x = "Number of clusters", y = expression("Coverage of 95% CI for"~sigma^2),
-#        subtitle = "beta_type = bilinear, censor_rate = 0.25")
-# plot_sigma2_cover
+```{r fig1-mise}
+figs_additive[[1]]
 ```
 
-```{r gamma0}
-# Box plot: bias of intercept
-plot_gamma0_bias <- all_coef %>%
-  filter(beta_type == "ridge" & censor_rate == 0.25) %>%
-  ggplot(aes(factor(n_cluster), gamma_bias_1)) + 
-  geom_boxplot(fatten = 1.3) +
-  geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-  labs(x = "Number of clusters", y = "Bias of intercept",
-       subtitle = "beta_type = ridge, censor_rate = 0.25")
-plot_gamma0_bias
+## 2. Pointwise coverage
 
-# Box plot: MSE of intercept
-plot_gamma0_mse <- all_coef %>%
-  filter(tau == 1) %>%
-  ggplot(aes(factor(sigma), gamma_se_1)) + 
-  geom_boxplot(fatten = 1.3) +
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(tau), y = "MSE of intercept")
-plot_gamma0_mse
+```{r fig2-cover-pw}
+figs_additive[[2]]
+```
 
-# Bar plot: coverage of intercept
-plot_gamma0_cover <- all_coef %>%
-  filter(beta_type == "bilinear" & censor_rate == 0.25) %>%
-  ggplot(aes(factor(n_cluster), as.numeric(gamma_cover_1))) + 
-  geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-  geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(sigma~tau, labeller = labeller(sigma = label_both, tau = label_both)) +
-  labs(x = "Number of clusters", y = "Coverage of 95% CI for intercept",
-       subtitle = "beta_type = bilinear, censor_rate = 0.25")
-plot_gamma0_cover
+## 3. Simultaneous coverage
+
+Coverage rate over the 100 iterations, with a Clopper–Pearson 95% interval.
+
+```{r fig3-cover-sim}
+figs_additive[[3]]
+```
+
+## 4. Bias of $\tau^2$
+
+```{r fig4-tau2-bias}
+figs_additive[[4]]
+```
+
+## 5. Coverage of $\tau^2$
+
+```{r fig5-tau2-cover}
+figs_additive[[5]]
+```
+
+## 6. Bias of $\sigma^2$
+
+```{r fig6-sigma2-bias}
+figs_additive[[6]]
+```
+
+## 7. Coverage of $\sigma^2$
+
+```{r fig7-sigma2-cover}
+figs_additive[[7]]
+```
+
+## 8. C-index
+
+The **same** held-out subjects in **known** clusters are used.
+The only difference is whether the estimated frailty û_j is applied.
+
+```{r fig8-cindex, fig.width=13}
+figs_additive[[8]]
+```
+
+## 9. Integrated Brier score
+
+```{r fig9-ibs, fig.width=13}
+figs_additive[[9]]
+```
+
+## 10. Estimated surface
+
+```{r fig10-surface-additive, fig.width=12, fig.height=4.6}
+figs_additive[[10]]
+```
+
+## Summary
+
+```{r tbl-summary}
+sub |>
+  group_by(censor_lab, family, model) |>
+  summarise(
+    ISE            = mean(beta_ise),
+    `Cover pw`     = mean(beta_cover_pw),
+    `Cover sim`    = mean(beta_cover_sim),
+    `Bias tau2`    = mean(tau2_bias),
+    `Cover tau2`   = mean(tau2_cover),
+    `Bias sigma2`  = mean(sigma2_bias),
+    `Cover sigma2` = mean(sigma2_cover),
+    `C new clust`  = mean(c_index),
+    `C known u=0`  = mean(c_index_known_marg),
+    `C known û`    = mean(c_index_known),
+    `IBS known u=0`= mean(ibs_known_marg),
+    `IBS known û`  = mean(ibs_known),
+    .groups = "drop"
+  ) |>
+  kbl(digits = 3, caption = "Means over tau and iterations, J = 50, additive surface.") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) |>
+  collapse_rows(columns = 1:2, valign = "top")
+```
+
+# Bilinear surface {.tabset}
+
+$\beta(s,a) = 2sa$ — a pure multiplicative interaction, zero along $s=0$ or $a=0$. Same layout and subset as above (J = 50).
+
+```{r figs-bilinear-1, results='asis', fig.width=11, fig.height=7}
+emit_figures(figs_bilinear, 1:7)
+```
+
+```{r figs-bilinear-2, results='asis', fig.width=13, fig.height=7}
+emit_figures(figs_bilinear, 8:9)
+```
+
+```{r figs-bilinear-3, results='asis', fig.width=12, fig.height=4.6}
+emit_figures(figs_bilinear, 10)
+```
+
+## Summary
+
+```{r tbl-summary-bilinear}
+summary_table("bilinear")
+```
+
+# Ridge surface {.tabset}
+
+$\beta(s,a) = \exp\{-6(s-a)^2\}$ — a diagonal ridge that is genuinely
+non-separable. Same layout and subset as above (J = 50).
+
+```{r figs-ridge-1, results='asis', fig.width=11, fig.height=7}
+emit_figures(figs_ridge, 1:7)
+```
+
+```{r figs-ridge-2, results='asis', fig.width=13, fig.height=7}
+emit_figures(figs_ridge, 8:9)
+```
+
+```{r figs-ridge-3, results='asis', fig.width=12, fig.height=4.6}
+emit_figures(figs_ridge, 10)
+```
+
+## Summary
+
+```{r tbl-summary-ridge}
+summary_table("ridge")
 ```
