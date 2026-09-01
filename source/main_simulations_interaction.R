@@ -351,7 +351,16 @@ for(iter in 1:N_iter){
       lambda_init = 1,         # smoothing parameter
       A_lambda = 1, B_lambda = 1,
       var_gamma = 100,
-      A_tau2 = 3, B_tau2 = 2,  # IG(A,B) for tau^2 (shape A, scale B)
+      # IG(0.01, 0.01) for tau^2, not IG(3, 2).  IG(3, 2) has prior mean 1, which
+      # swamps the frailty likelihood when tau is small: at tau = 0.2 it gave
+      # tau2_hat ~ 0.15-0.21 against a truth of 0.04 and coverage of exactly 0,
+      # at both J = 25 and J = 50.  The near-flat prior recovers 0.043-0.060 with
+      # coverage 0.92-1.00 and costs nothing at tau = 0.5 or 1 (coverage 1.00
+      # either way at 30 reps).  coxme recovers 0.039 on the same data, so the
+      # information is in the likelihood and only the prior was obstructing it.
+      # Note IG(3, 2)'s prior mean of 1 also happens to equal the tau = 1 truth,
+      # which flattered that cell.
+      A_tau2 = 0.01, B_tau2 = 0.01,
       A_sigma2 = 3, B_sigma2 = 2,  # IG(A,B) for sigma^2 (shape A, scale B)
       # MCMC
       n_iter = n_iter_fit,
@@ -435,7 +444,10 @@ for(iter in 1:N_iter){
     } else {
       tau2_true     # AFT DGM: same scale, no correction needed
     }
-    tau2_est   <- mean(fit$tau2)
+    # Posterior MEDIAN, not mean: the tau2 posterior is right-skewed (skewness
+    # 1.2-1.4 at J = 25), so the mean sits above the truth by construction.  At
+    # tau = 1, J = 25 the median gives 1.119 against a mean of 1.188.
+    tau2_est   <- median(fit$tau2)
     tau2_bias  <- tau2_est - tau2_implied   # compare against implied target
     tau2_se    <- (tau2_est - tau2_implied)^2
     tau2_cover <- (tau2_implied >= quantile(fit$tau2, 0.025)) &
@@ -611,7 +623,7 @@ for(iter in 1:N_iter){
       # K = K_s_fit, basis_type = bs_s_fit,
       # lambda_init = 1, A_lambda = 1, B_lambda = 1,
       # var_gamma = 100,
-      # A_tau2 = 3, B_tau2 = 2,
+      # A_tau2 = 0.01, B_tau2 = 0.01,
       # A_sigma2 = 3, B_sigma2 = 2,
       # n_iter = n_iter_fit, n_burn = n_burn_fit, n_thin = 1, verbose = FALSE
     # )
@@ -661,7 +673,7 @@ for(iter in 1:N_iter){
     # q_ni_gamma     <- apply(fit_ni$gamma, 2, quantile, probs = c(0.025, 0.975), na.rm = TRUE)
     # ni_gamma_cover <- (gamma_implied >= q_ni_gamma[1, ]) & (gamma_implied <= q_ni_gamma[2, ])
 #
-    # ni_tau2_est   <- mean(fit_ni$tau2)
+    # ni_tau2_est   <- median(fit_ni$tau2)
     # ni_tau2_bias  <- ni_tau2_est - tau2_implied
     # ni_tau2_se    <- (ni_tau2_est - tau2_implied)^2
     # ni_tau2_cover <- (tau2_implied >= quantile(fit_ni$tau2, 0.025)) &
@@ -857,10 +869,14 @@ result <- list(
 ###############################################################
 ## save result
 ###############################################################
-Date = gsub("-", "", Sys.Date())
-dir.create(file.path(here::here("outputs"), Date), showWarnings = FALSE)
+# Suffix the folder with the study name.  Both runners are date-stamped, so
+# without this they would write outputs/<date>/<scenario>.RDA to the SAME path
+# and whichever finished second would silently overwrite the other.
+Date   <- gsub("-", "", Sys.Date())
+outdir <- file.path(here::here("outputs"), paste0(Date, "_interaction"))
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 
-filename = paste0(here::here("outputs", Date), "/", scenario, ".RDA")
+filename <- file.path(outdir, paste0(scenario, ".RDA"))
 save(result, file = filename)
 
 ###############################################################

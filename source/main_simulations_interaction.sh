@@ -2,8 +2,8 @@
 #SBATCH --array=1-243%243
 #SBATCH --job-name=main_simulations
 #SBATCH --partition=wrobel
-#SBATCH --output=main_simulations.out
-#SBATCH --error=main_simulations.err
+#SBATCH --output=main_simulations_interaction.out
+#SBATCH --error=main_simulations_interaction.err
 
 module purge
 module load R/4.4.0

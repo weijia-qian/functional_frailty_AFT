@@ -1,7 +1,16 @@
-simulate_AFT = function(data = dat_func, 
+simulate_AFT = function(data = NULL,          # unused; kept for back-compatibility
                         family = c("lognormal", "loglogistic"),
                         n_cluster = 100,
-                        n_subject = 5,
+                        n_subject = 5,          # used only when N_total is NULL
+                        N_total = NULL,         # if given, cluster sizes are drawn from
+                                                # Uniform(mean*(1-f), mean*(1+f)) and
+                                                # reconciled to sum to N_total exactly,
+                                                # matching simulate_AFT_interaction.R
+                        range_factor = 0.5,     # the f above
+                        u = NULL,               # optional: supply the J cluster frailties
+                                                # instead of drawing them, so a second
+                                                # sample can share an existing one's
+                                                # cluster effects (KNOWN clusters)
                         # npc = 5,
                         tmax = 1,
                         nS = 401,
@@ -36,8 +45,34 @@ simulate_AFT = function(data = dat_func,
   # set.seed(seed)
   
   # ---- build cluster/subject indexing ----
-  N = n_cluster * n_subject
-  cluster_id <- rep(seq_len(n_cluster), each = n_subject)
+  #
+  #  N_total = NULL keeps the original balanced design (n_subject per cluster).
+  #  Supplying N_total instead fixes the total exactly and draws the J cluster
+  #  sizes from Uniform(nj_min, nj_max), spreading any discrepancy one subject
+  #  at a time over randomly chosen clusters so that no cluster absorbs the
+  #  whole remainder.  This mirrors simulate_AFT_interaction.R.
+  if (is.null(N_total)) {
+    N  <- n_cluster * n_subject
+    nj <- rep(n_subject, n_cluster)
+  } else {
+    mean_nj <- N_total / n_cluster
+    nj_min  <- max(1L, floor(mean_nj * (1 - range_factor)))
+    nj_max  <- ceiling(mean_nj * (1 + range_factor))
+
+    nj  <- pmax(1L, round(runif(n_cluster, nj_min, nj_max)))
+    gap <- as.integer(N_total - sum(nj))
+    while (gap != 0L) {
+      i <- sample.int(n_cluster, 1L)
+      if (gap > 0L) {
+        nj[i] <- nj[i] + 1L; gap <- gap - 1L
+      } else if (nj[i] > 1L) {
+        nj[i] <- nj[i] - 1L; gap <- gap + 1L
+      }
+    }
+    stopifnot(sum(nj) == N_total, all(nj >= 1L))
+    N <- sum(nj)
+  }
+  cluster_id <- rep(seq_len(n_cluster), times = nj)
   
   # ---- simulate two scalar covariates (z1, z2) ----
   z1 <- rnorm(N, mean = 0, sd = 1)
@@ -152,8 +187,14 @@ simulate_AFT = function(data = dat_func,
     stop('Invalid family.')
   }
   
-  # ---- shared frailty u_j by subject ----
-  u <- stats::rnorm(n_cluster, mean = 0, sd = tau)
+  # ---- shared frailty u_j by cluster ----
+  if (is.null(u)) {
+    u <- stats::rnorm(n_cluster, mean = 0, sd = tau)
+  } else {
+    if (length(u) != n_cluster)
+      stop("`u` must have length n_cluster (", n_cluster, "), got ", length(u), ".")
+    u <- as.numeric(u)
+  }
   frailty <- u[cluster_id]
   
   # ---- generate survival time ----
@@ -191,7 +232,9 @@ simulate_AFT = function(data = dat_func,
                        tau = rep(tau, nS)
                        )
   
-  out <- list(data = sim_data, coefficients = df_coef, family = family, beta_type = beta_type, bs_coef = bs_coef, u = u)
+  out <- list(data = sim_data, coefficients = df_coef, family = family,
+              beta_type = beta_type, bs_coef = bs_coef, u = u,
+              s_grid = s_grid, n_subjects = nj)
   
   out
 }
