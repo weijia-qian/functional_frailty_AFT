@@ -96,7 +96,7 @@ censor_rate = c(0.5)
 # "cox" arm; 0.3 gives a violation cox.zph rejects at p < 1e-40 (N = 8000, no
 # frailty) while keeping every rho_i comfortably positive.
 PSI_TV = 0.3
-N_iter = 500
+N_iter = 100
 N_test = 1000      # out-of-sample test set size (new subjects, NEW clusters)
 N_known = 1000     # out-of-sample test set size (new subjects, KNOWN clusters);
                    # drawn per iteration sharing the training data's frailties

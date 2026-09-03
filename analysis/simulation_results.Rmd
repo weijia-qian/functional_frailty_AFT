@@ -1,252 +1,398 @@
 ---
-title: "Simulation Results"
+title: "Functional Frailty AFT with beta(s) — Simulation Report"
 author: "Weijia Qian"
 date: '`r format(Sys.time(), "%Y-%m-%d")`'
 output:
-  html_document: 
+  html_document:
     code_folding: hide
     toc: true
     toc_float: true
+    number_sections: true
+    fig_width: 13
+    fig_height: 7.5
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, repr.plot.width = 12, repr.plot.height = 8)
-library(CCMHr)
-library(gt)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", dpi = 150)
 library(kableExtra)
-library(MASS)
-library(patchwork)
-library(refund)
-library(scam)
-library(splines)
+library(RColorBrewer)
 library(tidyverse)
 
-theme_set(theme_bw() + 
-            theme(legend.position = "bottom",
-                  ))
-# theme(axis.text = element_text(size = 15),
-#         axis.title = element_text(size = 15),
-#         axis.text.x = element_blank(),
-#         axis.ticks.x = element_blank(),
-#         legend.position = "bottom",
-#         legend.box.margin = margin(t = -20, b = 0),
-#         legend.title = element_text(size = 15),
-#         legend.text = element_text(size = 15))
-
-# Define a custom color palette for the methods
-my_colors <- c(
-  "FTTM" = "#440154",
-  # "mgcv LFCM" = "#414487",
-  "LFCM" = "#2A788E",
-  "loglogistic lfAFT" = "#7AD151",
-  "lognormal lfAFT" = "#FDE725"
+theme_set(
+  theme_bw(base_size = 15) +
+    theme(legend.position   = "bottom",
+          panel.grid.minor  = element_blank(),
+          strip.background  = element_rect(fill = "grey92", colour = NA),
+          strip.text        = element_text(face = "bold", size = 13),
+          plot.subtitle     = element_text(size = 12),
+          legend.text       = element_text(size = 13),
+          legend.title      = element_text(size = 13))
 )
-fig_dir <- "/Users/weijia/Research/Frailty/analysis/figures"
 
-folder_path <- "/Users/weijia/Research/Frailty/outputs/20260228"
-# folder_path <- "/Users/weijia/Research/Frailty/outputs/20260117"
-rda_files <- list.files(path = folder_path, pattern = "\\.RDA$", full.names = TRUE)
-all_results <- list()
-for (i in 1:length(rda_files)) {
-  all_results[[i]] <- loadRDa(rda_files[[i]])
-}
+set2 <- brewer.pal(8, "Set2")
+
+# Two models are compared here, so colour encodes the model.  Cluster count is
+# the x axis and tau the columns; N_total and censoring are single-valued in
+# this design and are reported in the settings table instead.
+model_cols <- c("Functional frailty AFT" = set2[1],
+                "Linear functional Cox (fcoxFr)" = set2[2])
+
+# The predictive figures instead contrast the frailty being off vs on, so they
+# need a second pair -- warm against cool, so it separates at a glance.
+pred_cols <- c("marginal (u = 0)" = set2[2],
+               "conditional (û)"  = set2[3])
+
+results_dir <- here::here("outputs", "20260901")
+fig_dir     <- here::here("analysis", "figures_noint")
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
 ```
 
-### Computation Time
-```{r}
-all_info <- data.frame()
-# Loop through all scenarios and iterations to extract 'info'
-for (scenario in all_results) {
-    all_info <- rbind(all_info, scenario $info)
+```{r load-data, cache=TRUE, cache.extra=length(list.files(results_dir))}
+# Each .RDA holds list(info, coef, s_grid, beta_true, beta).  beta is a list of
+# N_iter x nS matrices; only info and coef are needed for the metric figures.
+load_result <- function(path) { e <- new.env(); load(path, envir = e); e$result }
+
+rda_files <- list.files(results_dir, pattern = "\\.RDA$", full.names = TRUE)
+raw <- map_dfr(rda_files, function(p) {
+  r <- load_result(p)
+  if (nrow(r$coef) == 0L) return(NULL)      # scenario where every iteration failed
+  # The comparator reports cor(beta_hat, beta) because its coefficient lives on
+  # the log-hazard scale.  Compute the same quantity for the Bayesian fit, per
+  # iteration, so the two can share an axis.
+  ok  <- which(!apply(r$beta$mean, 1, function(x) all(is.na(x))))
+  cb  <- rep(NA_real_, nrow(r$coef))
+  cb[seq_along(ok)] <- apply(r$beta$mean[ok, , drop = FALSE], 1,
+                             function(b) suppressWarnings(cor(b, r$beta_true)))
+  cbind(r$info[, setdiff(names(r$info), "seed")], r$coef,
+        beta_shape_cor_bayes = cb)
+})
+
+n_grid_total <- length(rda_files)
+n_scen_have  <- if (nrow(raw)) dplyr::n_distinct(raw$scenario) else 0L
+
+# A runner that loses every iteration still writes a file per scenario, so an
+# empty `raw` is the signature of a failed run rather than a missing one.  Say
+# so plainly instead of failing later with an opaque error.
+if (n_scen_have == 0L) {
+  stop("No completed iterations in ", results_dir, ": all ", n_grid_total,
+       " scenario files contain an empty `coef`.  Every iteration was skipped by ",
+       "the runner's tryCatch, which still saves a file, so the run looks ",
+       "successful to SLURM.  Check main_simulations.err for the repeated ",
+       "warning text before re-knitting.")
 }
 
+has_comparator <- any(grepl("^lf_", names(raw)))
 
-# plot_time <- all_info %>%
-#   ggplot(aes(factor(tau), time)) + 
-#   geom_boxplot(fatten = 1.3) +
-#   facet_grid(family~n_cluster, labeller = labeller(n_cluster = label_both, family = label_value), scales = "free") +
-#   labs(x = expression(tau), y = "Computation Time")
-# plot_time
-# ggsave(file.path(fig_dir, "fig_sim_brier.jpeg"), plot_linear_Brier, width = 6, height = 4, dpi = 500)
-
-```
-
-### MISE for Estimated Coefficient Functions Across Iterations
-```{r}
-all_coef <- data.frame() 
-
-# Loop through all scenarios and iterations to extract 'coef'
-for (scenario in all_results) {
-  tmp_data <- cbind(scenario$info, scenario$coef)
-  all_coef <- rbind(all_coef, tmp_data)
-}
-
-table_coef <- all_coef %>%
-  group_by(beta_type, family, n_cluster, tau, sigma, censor_rate) %>%
-  summarise(beta_mise = mean(beta_ise),
-            beta_mean_cover = mean(beta_cover),
-            tau2_mean_bias = mean(tau2_bias),
-            tau2_mse = mean(tau2_se),
-            tau2_mean_cover = mean(tau2_cover),
-            sigma2_mean_bias = mean(sigma2_bias),
-            sigma2_mse = mean(sigma2_se),
-            sigma2_mean_cover = mean(sigma2_cover)
-            )
-
-table_beta_bias <- all_coef %>%
-  group_by(beta_type, family, n_cluster, tau, sigma, censor_rate) %>%
-  summarise(
-    across(
-      starts_with("beta_bias_"),
-      ~ mean(.x, na.rm = TRUE)
-    ),
-    .groups = "drop"
-  )  %>%
-  pivot_longer(
-    cols = starts_with("beta_bias_"),
-    names_to = "beta_index",
-    values_to = "bias"
-  ) %>%
+dat <- raw |>
   mutate(
-    beta_index = as.integer(gsub("beta_bias_", "", beta_index))
+    family = factor(family, levels = c("lognormal", "cox", "cox_tv"),
+                    labels = c("lognormal", "Cox / Weibull PH", "Cox, non-PH")),
+    J_f     = factor(n_cluster, levels = sort(unique(n_cluster))),
+    tau_lab = factor(paste0("tau = ", tau), levels = paste0("tau = ", sort(unique(tau))))
   )
 
-plot_beta_bias <- table_beta_bias %>%
-  filter(tau == 2) %>%
-  ggplot(aes(x = beta_index, y = bias, color = factor(sigma), group = sigma)) +
-  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.4) +
-  geom_line(linewidth = 0.7) +
-  # geom_point(size = 2) +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(
-    x = "Function index",
-    y = expression("Bias of"~beta(s)),
-    color = expression(sigma)
+avail_bt <- sort(unique(dat$beta_type))
+```
+
+# Simulation settings
+
+```{r tbl-settings}
+grid_levels <- function(v) paste(sort(unique(raw[[v]])), collapse = ", ")
+
+tibble::tribble(
+  ~Element, ~Setting, ~Note,
+  "Families (DGM)", "lognormal, Cox (Weibull PH), Cox with a time-varying effect",
+    "Error shape and, for the last arm, the PH assumption itself",
+  "Coefficient function", grid_levels("beta_type"),
+    "B-spline beta(s); no age interaction",
+  "Clusters J", grid_levels("n_cluster"), "Total N fixed",
+  "Frailty SD tau", grid_levels("tau"), "AFT (log-time) scale, common to all families",
+  "Sample size", grid_levels("N_total"), "Cluster sizes ~ Uniform(mean +/- 0.5 mean)",
+  "Censoring rate", grid_levels("censor_rate"), "C ~ Uniform(0, ub), ub solved to hit the target",
+  "Residual SD sigma", grid_levels("sigma"),
+    "Log-time residual SD target; each DGM takes a different scale parameter",
+  "Functional grid nS", grid_levels("nS"), "X(s) via Karhunen-Loeve, Fourier basis, decay k^-0.7",
+  "Scenarios", sprintf("%d of %d", n_scen_have, n_grid_total), "3 families x 3 J x 3 tau",
+  "Iterations per scenario", as.character(max(raw$iter)), "",
+  "Test sets", "N = 1000 marginal (new clusters), N = 1000 conditional (known clusters)",
+    "Marginal set fixed within a scenario; conditional set redrawn each iteration",
+  "MCMC", "20,000 iterations, 10,000 burn-in, no thinning", "",
+  "Priors", "gamma ~ N(0,100); sigma^2 ~ IG(3,2); tau^2 ~ IG(0.01,0.01); lambda ~ Gamma(1,1)",
+    "tau^2 prior weakened from IG(3,2), whose prior mean of 1 swamped the frailty likelihood at small tau"
+) |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+```{r tbl-timing}
+raw |>
+  summarise(gibbs_median = median(time), gibbs_max = max(time),
+            comparator_median = if (has_comparator) median(time_lf) else NA_real_,
+            total_cpu_hours = sum(time + if (has_comparator) time_lf else 0) / 3600) |>
+  kbl(digits = 1, caption = "Wall-clock seconds per fit.") |>
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+# Models compared
+
+```{r tbl-models}
+tibble::tribble(
+  ~Feature, ~`Functional frailty AFT`, ~`Linear functional Cox (fcoxFr)`,
+  "Scale", "log-time (AFT)", "log-hazard (PH)",
+  "Functional effect", "integral X(s) beta(s) ds, penalised spline",
+    "integral X(s) beta(s) ds, FPCA basis",
+  "Cluster frailty", "u_j ~ N(0, tau^2), shared", "Gaussian random intercept via coxme",
+  "Baseline", "Gaussian working error, data augmentation for censoring", "Breslow, unspecified",
+  "Inference", "Gibbs sampler, full posterior", "Penalised partial likelihood",
+  "Implementation", "gibbs_functional_frailty()", "fpcr() in fcoxFr_supp.R"
+) |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+Because the comparator works on the log-hazard scale and expands `beta(s)` in an
+FPCA basis, its coefficient function is not on the same scale as the AFT target.
+It is therefore compared on **shape** (correlation with the truth) and on the
+predictive metrics, which are scale-free; ISE and interval coverage are reported
+for the Bayesian model only.
+
+# Evaluation metrics
+
+```{r tbl-metrics}
+tibble::tribble(
+  ~Metric, ~Definition, ~Target,
+  "ISE of beta(s)", "Mean squared deviation from the true curve over the s grid; the mean over iterations is the MISE", "0",
+  "Pointwise coverage", "Fraction of s-grid points whose true value falls in the 95% pointwise CrI", "0.95",
+  "Simultaneous coverage", "Whether the ENTIRE true curve falls inside the 95% max-statistic band (one 0/1 per iteration)", "0.95",
+  "beta shape correlation", "cor(beta_hat(s), beta(s)) -- the comparator's only scale-free beta summary", "1",
+  "Bias of tau^2", "Posterior MEDIAN minus the AFT-scale target (the tau^2 posterior is right-skewed)", "0",
+  "Coverage of tau^2", "Whether the target falls in the 95% CrI (one 0/1 per iteration)", "0.95",
+  "Bias of sigma^2", "Posterior mean minus the log-time residual variance", "0",
+  "Coverage of sigma^2", "Whether sigma^2_true falls in the 95% CrI (one 0/1 per iteration)", "0.95",
+  "C-index / IBS, new clusters", "Uno's IPCW C-index and IPCW integrated Brier score, frailty = 0", "1 / 0",
+  "C-index / IBS, known clusters", "The same held-out subjects with the frailty off (u = 0) and on (u_hat)", "1 / 0"
+) |>
+  kbl(caption = paste("Estimation metrics are scored on the AFT (log-time) scale.",
+                      "For the Cox arms the target is the implied AFT quantity, not",
+                      "the DGM parameter.")) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+# Figures
+
+Rows are the data-generating family and columns τ; x is the number of clusters.
+Total sample size and censoring rate are single-valued in this design, so nothing
+is pooled away. Where both models supply a metric, colour separates them.
+
+```{r fig-helpers}
+box_panel <- function(d, yvar, ylab, hline = NULL) {
+  p <- ggplot(d, aes(x = J_f, y = .data[[yvar]]))
+  if (!is.null(hline))
+    p <- p + geom_hline(yintercept = hline, colour = "red",
+                        linetype = "dotted", linewidth = 0.6)
+  p +
+    geom_boxplot(fill = model_cols[[1]], outlier.size = 0.3, linewidth = 0.3,
+                 alpha = 0.9, width = 0.6) +
+    facet_grid(family ~ tau_lab) +
+    labs(x = "number of clusters J", y = ylab)
+}
+
+# Two models on the same axes, where the comparator supplies the metric too.
+box_panel2 <- function(d, yvar, lfvar, ylab, hline = NULL) {
+  s <- d |>
+    select(family, tau_lab, J_f, a = all_of(yvar), b = all_of(lfvar)) |>
+    pivot_longer(c(a, b), names_to = "model", values_to = "value") |>
+    mutate(model = factor(model, c("a", "b"), names(model_cols)))
+  p <- ggplot(s, aes(x = J_f, y = value, fill = model))
+  if (!is.null(hline))
+    p <- p + geom_hline(yintercept = hline, colour = "red",
+                        linetype = "dotted", linewidth = 0.6)
+  p +
+    geom_boxplot(outlier.size = 0.3, linewidth = 0.3, alpha = 0.9,
+                 position = position_dodge(width = 0.8)) +
+    facet_grid(family ~ tau_lab) +
+    scale_fill_manual(values = model_cols, name = NULL) +
+    guides(fill = guide_legend(nrow = 1)) +
+    labs(x = "number of clusters J", y = ylab)
+}
+
+# Coverage indicators are 0/1 per iteration, so the informative summary is the
+# rate over iterations with a Clopper-Pearson interval, not a boxplot.
+rate_panel <- function(d, cvar, ylab) {
+  s <- d |>
+    group_by(family, tau_lab, J_f) |>
+    summarise(k = sum(.data[[cvar]]), n = n(), .groups = "drop") |>
+    mutate(rate = k / n,
+           lo = if_else(k == 0, 0, qbeta(0.025, k, n - k + 1)),
+           hi = if_else(k == n, 1, qbeta(0.975, k + 1, n - k)))
+  ggplot(s, aes(x = J_f, y = rate)) +
+    geom_hline(yintercept = 0.95, colour = "red", linetype = "dotted", linewidth = 0.6) +
+    geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.18, linewidth = 0.5,
+                  colour = model_cols[[1]]) +
+    geom_point(size = 2.4, colour = model_cols[[1]]) +
+    facet_grid(family ~ tau_lab) +
+    scale_y_continuous(limits = c(0, 1)) +
+    labs(x = "number of clusters J", y = ylab)
+}
+
+# Known-cluster test set scored twice from the same fit and the same held-out
+# subjects: frailty off, then frailty set to u_hat_j.  Only the frailty differs,
+# so the gap between the colours is what the frailty contributes.
+pred_panel <- function(d, marg, cond, ylab, hline = NULL) {
+  s <- d |>
+    select(family, tau_lab, J_f, marginal = all_of(marg), conditional = all_of(cond)) |>
+    pivot_longer(c(marginal, conditional), names_to = "evaluation", values_to = "value") |>
+    mutate(evaluation = factor(recode(evaluation,
+                                      marginal    = "marginal (u = 0)",
+                                      conditional = "conditional (û)"),
+                               levels = names(pred_cols)))
+  p <- ggplot(s, aes(x = J_f, y = value, fill = evaluation))
+  if (!is.null(hline))
+    p <- p + geom_hline(yintercept = hline, colour = "red",
+                        linetype = "dotted", linewidth = 0.6)
+  p +
+    geom_boxplot(outlier.size = 0.3, linewidth = 0.3, alpha = 0.9,
+                 position = position_dodge(width = 0.8)) +
+    facet_grid(family ~ tau_lab) +
+    scale_fill_manual(values = pred_cols, name = NULL) +
+    labs(x = "number of clusters J", y = ylab)
+}
+```
+
+```{r load-beta, cache=TRUE, dependson="load-data"}
+# beta(s) averaged over the completed iterations of each scenario.
+beta_dat <- map_dfr(rda_files, function(p) {
+  r <- load_result(p)
+  if (nrow(r$coef) == 0L) return(NULL)
+  i <- r$info[1, ]
+  ok <- !apply(r$beta$mean, 1, function(x) all(is.na(x)))
+  tibble(family = i$family, beta_type = i$beta_type, tau = i$tau,
+         n_cluster = i$n_cluster, s = r$s_grid, beta_true = r$beta_true,
+         est  = colMeans(r$beta$mean[ok, , drop = FALSE]),
+         q025 = colMeans(r$beta$q025[ok, , drop = FALSE]),
+         q975 = colMeans(r$beta$q975[ok, , drop = FALSE]))
+})
+```
+
+```{r fig-beta-curve}
+beta_curve <- function(bt) {
+  beta_dat |>
+    filter(beta_type == bt) |>
+    group_by(family, tau, s) |>                 # average over cluster count
+    summarise(across(c(beta_true, est, q025, q975), mean), .groups = "drop") |>
+    mutate(family = factor(family, c("lognormal", "cox", "cox_tv"),
+                           c("lognormal", "Cox / Weibull PH", "Cox, non-PH")),
+           tau_lab = factor(paste0("tau = ", tau))) |>
+    ggplot(aes(s)) +
+    geom_ribbon(aes(ymin = q025, ymax = q975), fill = model_cols[[1]], alpha = 0.25) +
+    geom_line(aes(y = beta_true), linetype = "dotted", linewidth = 0.9, colour = "grey20") +
+    geom_line(aes(y = est), colour = model_cols[[1]], linewidth = 1) +
+    facet_grid(family ~ tau_lab, scales = "free_y") +
+    labs(x = "s", y = expression(hat(beta)(s)),
+         subtitle = paste("Dotted grey = truth; line = posterior mean averaged over",
+                          "iterations and cluster counts;\nribbon = average pointwise",
+                          "95% credible band."))
+}
+```
+
+```{r build-figs, include=FALSE}
+fig_keys <- c("mise_beta", "cover_pointwise_beta", "cover_simultaneous_beta",
+              "beta_shape_cor", "bias_tau2", "cover_tau2", "bias_sigma2",
+              "cover_sigma2", "c_index", "ibs", "frailty_gain", "beta_curve")
+
+make_figs <- function(bt) {
+  # fig_keys names the saved files; a mismatch would silently write fig12_NA.png
+  stopifnot(length(fig_keys) == 12L)
+  d <- dat |> filter(beta_type == bt)
+  list(
+    "1. ISE of beta(s)" =
+      box_panel(d, "beta_ise", expression("ISE of " * beta(s))) +
+        labs(subtitle = "Bayesian model only. Mean over iterations = MISE."),
+    "2. Pointwise coverage" =
+      box_panel(d, "beta_cover_pw",
+                expression("Pointwise 95% CrI coverage of " * beta(s)), hline = 0.95) +
+        labs(subtitle = "Fraction of s-grid points covered, per iteration. Red: nominal 0.95."),
+    "3. Simultaneous coverage" =
+      rate_panel(d, "beta_cover_sim",
+                 expression("Simultaneous 95% coverage of " * beta(s))) +
+        labs(subtitle = "Whole-curve coverage rate. Red: nominal 0.95."),
+    "4. Shape recovery of beta(s)" =
+      (if (has_comparator)
+         box_panel2(d, "beta_shape_cor_bayes", "lf_beta_cor",
+                    expression("cor(" * hat(beta)(s) * ", " * beta(s) * ")"), hline = 1)
+       else box_panel(d, "beta_shape_cor_bayes",
+                    expression("cor(" * hat(beta)(s) * ", " * beta(s) * ")"), hline = 1)) +
+        labs(subtitle = paste("Scale-free, so the log-hazard comparator is comparable here.",
+                              "Red: perfect shape.")),
+    "5. Bias of tau^2" =
+      box_panel(d, "tau2_bias", expression("Bias of " * tau^2), hline = 0) +
+        labs(subtitle = "Posterior median minus the AFT-scale target. Red: zero bias."),
+    "6. Coverage of tau^2" =
+      rate_panel(d, "tau2_cover", expression("95% CrI coverage of " * tau^2)) +
+        labs(subtitle = "Coverage rate. Red: nominal 0.95."),
+    "7. Bias of sigma^2" =
+      box_panel(d, "sigma2_bias", expression("Bias of " * sigma^2), hline = 0) +
+        labs(subtitle = "Posterior mean minus the log-time residual variance. Red: zero bias."),
+    "8. Coverage of sigma^2" =
+      rate_panel(d, "sigma2_cover", expression("95% CrI coverage of " * sigma^2)) +
+        labs(subtitle = "Coverage rate. Red: nominal 0.95."),
+    "9. C-index" =
+      (if (has_comparator)
+         box_panel2(d, "c_index", "lf_c_index", "Uno's IPCW C-index")
+       else box_panel(d, "c_index", "Uno's IPCW C-index")) +
+        labs(subtitle = "Marginal test set: new subjects in new clusters, frailty = 0."),
+    "10. Integrated Brier score" =
+      (if (has_comparator)
+         box_panel2(d, "ibs", "lf_ibs", "IPCW integrated Brier score", hline = 0)
+       else box_panel(d, "ibs", "IPCW integrated Brier score", hline = 0)) +
+        labs(subtitle = "Marginal test set. Red: zero (perfect prediction)."),
+    "11. Frailty contribution" =
+      pred_panel(d, "c_index_known_marg", "c_index_known", "Uno's IPCW C-index") +
+        labs(subtitle = paste("Known-cluster test set, Bayesian model:",
+                              "frailty 0 vs û_j.")),
+    "12. Estimated beta(s)" = beta_curve(bt)
   )
-plot_beta_bias
+}
 
-# Box plot: MISE of beta(s)
-plot_beta_mise <- all_coef %>%
-  filter(sigma == 1) %>%
-  ggplot(aes(factor(tau), beta_ise)) +
-  geom_boxplot(fatten = 1.3) +
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(tau), y = expression("MISE of"~beta(s)))
-plot_beta_mise
+figs <- setNames(lapply(avail_bt, make_figs), avail_bt)
 
-# Bar plot: coverage of beta(s)
-plot_beta_cover <- all_coef %>%
-  filter(tau == 1) %>%
-  ggplot(aes(factor(sigma), beta_cover)) + 
-  geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-  geom_hline(yintercept = 0.95, color = "red", lty = "dashed") +
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(sigma), y = expression("Coverage of 95% CI for"~beta(s)))
-plot_beta_cover
+save_fig <- function(p, name, w = 13, h = 7.5)
+  ggsave(file.path(fig_dir, paste0(name, ".png")), p, width = w, height = h, dpi = 300)
+for (bt in avail_bt)
+  walk(seq_along(figs[[bt]]), ~ save_fig(figs[[bt]][[.x]],
+       sprintf("fig%d_%s_%s", .x, fig_keys[.x], bt)))
 ```
 
-
-```{r tau2}
-# Box plot: bias of tau2
-plot_tau2_bias <- all_coef %>%
-  filter(sigma == 1) %>%
-  ggplot(aes(factor(tau), tau2_bias)) + 
-  geom_boxplot(fatten = 1.3) +
-  geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(tau), y = expression("Bias of"~tau^2))
-plot_tau2_bias
-
-# Box plot: MSE of tau2
-plot_tau2_mse <- all_coef %>%
-  filter(sigma == 1) %>%
-  ggplot(aes(factor(tau), tau2_se)) + 
-  geom_boxplot(fatten = 1.3) +
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(tau), y = expression("MSE of"~tau^2))
-plot_tau2_mse
-
-# Bar plot: coverage of tau2
-plot_tau2_cover <- all_coef %>%
-  filter(sigma == 1) %>%
-  ggplot(aes(factor(tau), as.numeric(tau2_cover))) + 
-  geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-  geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(tau), y = expression("Coverage of 95% CI for"~tau^2))
-plot_tau2_cover
+```{r emit, results='asis'}
+emit_figures <- function(fs) {
+  for (k in seq_along(fs)) {
+    cat("\n\n## ", names(fs)[k], " {.unnumbered}\n\n", sep = "")
+    print(fs[[k]])
+  }
+}
+for (bt in avail_bt) {
+  cat("\n\n# ", bt, "\n", sep = "")
+  emit_figures(figs[[bt]])
+}
 ```
 
+# Summary
 
-```{r sigma2}
-# Box plot: bias of sigma2
-plot_sigma2_bias <- all_coef %>%
-  filter(tau == 1) %>%
-  ggplot(aes(factor(sigma), sigma2_bias)) + 
-  geom_boxplot(fatten = 1.3) +
-  geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(sigma), y = expression("Bias of"~sigma^2))
-plot_sigma2_bias
+```{r tbl-summary}
+sub <- dat
+cols <- c(ISE = "beta_ise", `Cover pw` = "beta_cover_pw", `Cover sim` = "beta_cover_sim",
+          `Bias tau2` = "tau2_bias", `Cover tau2` = "tau2_cover",
+          `Bias sigma2` = "sigma2_bias", `Cover sigma2` = "sigma2_cover",
+          `C-index` = "c_index", IBS = "ibs")
+if (has_comparator) cols <- c(cols, `C-index (fcoxFr)` = "lf_c_index",
+                              `IBS (fcoxFr)` = "lf_ibs")
 
-# Box plot: MSE of sigma2
-plot_sigma2_mse <- all_coef %>%
-  filter(tau == 1) %>%
-  ggplot(aes(factor(sigma), sigma2_se)) + 
-  geom_boxplot(fatten = 1.3) +
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(sigma), y = expression("MSE of"~sigma^2))
-plot_sigma2_mse
-
-# Bar plot: coverage of sigma2
-plot_sigma2_cover <- all_coef %>%
-  filter(tau == 1) %>%
-  ggplot(aes(factor(sigma), as.numeric(sigma2_cover))) + 
-  geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-  geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(sigma), y = expression("Coverage of 95% CI for"~sigma^2))
-plot_sigma2_cover
-```
-
-```{r gamma0}
-# Box plot: bias of intercept
-plot_gamma0_bias <- all_coef %>%
-  filter(tau == 1) %>%
-  ggplot(aes(factor(sigma), gamma_bias_1)) + 
-  geom_boxplot(fatten = 1.3) +
-  geom_hline(yintercept = 0, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(sigma), y = "Bias of intercept")
-plot_gamma0_bias
-
-# Box plot: MSE of intercept
-plot_gamma0_mse <- all_coef %>%
-  filter(tau == 1) %>%
-  ggplot(aes(factor(sigma), gamma_se_1)) + 
-  geom_boxplot(fatten = 1.3) +
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(tau), y = "MSE of intercept")
-plot_gamma0_mse
-
-# Bar plot: coverage of intercept
-plot_gamma0_cover <- all_coef %>%
-  filter(tau == 1) %>%
-  ggplot(aes(factor(sigma), as.numeric(gamma_cover_1))) + 
-  geom_bar(stat = "summary", fun = "mean", position = position_dodge()) +
-  geom_hline(yintercept = 0.95, color = "red", lty = "dashed")+
-  # facet_grid(~beta_type, labeller = label_value, scales = "free") +
-  facet_grid(n_cluster~beta_type, labeller = labeller(beta_type = label_value, n_cluster = label_both)) +
-  labs(x = expression(tau), y = "Coverage of 95% CI for intercept")
-plot_gamma0_cover
+sub |>
+  group_by(family, tau, n_cluster) |>
+  summarise(iterations = n(), across(all_of(unname(cols)), mean), .groups = "drop") |>
+  rename(!!!cols) |>
+  kbl(digits = 3, caption = "Means over iterations.") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) |>
+  collapse_rows(columns = 1:2, valign = "top")
 ```
