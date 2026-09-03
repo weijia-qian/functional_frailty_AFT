@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --array=1-27%27
 #SBATCH --job-name=main_simulations
-#SBATCH --partition=wrobel
+#SBATCH --partition=chang
 #SBATCH --output=main_simulations.out
 #SBATCH --error=main_simulations.err
 
