@@ -40,10 +40,26 @@ one_col   <- set2[1]
 # between-scenario variance in every metric.  Family, N, tau and censoring all
 # stay visible -- censoring as the panel row, tau as the fill.
 tau_cols <- setNames(brewer.pal(3, "Set2"), c("0.2", "0.5", "1"))
-# Warm vs cool rather than two shades of one hue: the frailty contrast is the
-# point of these two figures, so the pair needs to separate at a glance.
-pred_cols <- c("marginal (u = 0)" = set2[2],   # orange
-               "conditional (û)"  = set2[3])   # blue-violet
+# The frailty contrast now sits in the facet columns, so the fill is free for
+# the censoring rate.  Censoring is ORDERED, so a sequential ramp reads better
+# than three categorical hues -- and it keeps these two figures visually
+# distinct from figures 1-7, where the same Set2 triple encodes tau.
+# The fixed-horizon change (tgrid taken from T_true, so it cannot move with the
+# censoring rate) landed AFTER outputs/20260901_interaction was produced.  A run
+# made before it has a horizon that shrinks as censoring rises, which confounds
+# the censoring contrast in figures 8-9 -- that is what makes the C-index appear
+# to improve and the IBS to fall at 75% censoring.  Post-fix runs record
+# tau_eval, so its presence says whether the caveat still applies.
+horizon_note <- function(d) {
+  if ("tau_eval" %in% names(d)) return("")
+  paste("\nCAVEAT: this run predates the fixed-horizon change, so the evaluation",
+        "horizon shrinks as censoring rises;\nthe censoring contrast is confounded",
+        "and the apparent gain at 75% censoring is an artefact.")
+}
+
+eval_levels <- c("marginal (u = 0)", "conditional (û)")
+cens_cols   <- setNames(brewer.pal(5, "BuPu")[c(2, 3, 5)],
+                        paste0(100 * c(0.25, 0.5, 0.75), "% censoring"))
 
 results_dir <- here::here("outputs", "20260901_interaction")
 fig_dir     <- here::here("analysis", "figures")
@@ -298,7 +314,23 @@ rate_panel <- function(d, cvar, ylab) {
 # fit and the same held-out subjects: once with the frailty set to 0 and once
 # with the estimated frailty u_hat_j.  Only the frailty differs, so the gap
 # between the two shades is exactly what the frailty contributes.
-pred_panel <- function(d, marg, cond, ylab, hline = NULL) {
+# Layout matches figures 5-6 of simulation_results.Rmd: x = tau, rows = family,
+# columns = the marginal/conditional contrast, bar = mean, whiskers = the IQR
+# (the spread across the pooled conditions, not the precision of the mean --
+# with thousands of iterations behind each bar a CI would be a hairline).
+#
+# That report puts the MODEL on the fill.  This batch fits a SINGLE model -- the
+# no-interaction comparator is commented out in the runner -- so there is no
+# second model to colour by, and the fill carries the censoring rate instead.
+# It is the one design factor with nowhere else to go once the evaluation takes
+# the columns, which keeps N_total and n_cluster the only pooled factors.
+# Iterations behind one bar: N_total and n_cluster are pooled, family / tau /
+# censoring are not, so each bar aggregates nrow(d) / (families x taus x rates).
+n_per_bar <- function(d)
+  nrow(d) / (dplyr::n_distinct(d$family) * dplyr::n_distinct(d$tau_f) *
+             dplyr::n_distinct(d$censor_lab))
+
+pred_bar <- function(d, marg, cond, ylab, hline = NULL, ybase = NULL) {
   s <- d |>
     select(family, tau_f, censor_lab, marginal = all_of(marg),
            conditional = all_of(cond)) |>
@@ -307,16 +339,28 @@ pred_panel <- function(d, marg, cond, ylab, hline = NULL) {
     mutate(evaluation = factor(recode(evaluation,
                                       marginal    = "marginal (u = 0)",
                                       conditional = "conditional (û)"),
-                               levels = names(pred_cols)))
-  p <- ggplot(s, aes(x = tau_f, y = value, fill = evaluation))
+                               levels = eval_levels)) |>
+    group_by(family, tau_f, censor_lab, evaluation) |>
+    summarise(m  = mean(value),
+              lo = quantile(value, 0.25),
+              hi = quantile(value, 0.75),
+              n  = n(), .groups = "drop")
+  p <- ggplot(s, aes(x = tau_f, y = m, fill = censor_lab))
   if (!is.null(hline))
     p <- p + geom_hline(yintercept = hline, colour = "red",
                         linetype = "dotted", linewidth = 0.6)
   p +
-    geom_boxplot(outlier.size = 0.4, linewidth = 0.3, alpha = 0.9,
-                 position = position_dodge(width = 0.8)) +
-    facet_grid(family ~ censor_lab) +
-    scale_fill_manual(values = pred_cols, name = NULL) +
+    geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.9) +
+    geom_errorbar(aes(ymin = lo, ymax = hi),
+                  position = position_dodge(width = 0.8),
+                  width = 0.2, linewidth = 0.4) +
+    facet_grid(family ~ evaluation,
+               scales = if (is.null(ybase)) "free_y" else "fixed") +
+    scale_fill_manual(values = cens_cols, name = NULL) +
+    guides(fill = guide_legend(nrow = 1)) +
+    # A C-index bar drawn from 0 puts every value in the top fifth of the panel;
+    # 0.5 is the metric's null.  coord_cartesian clips the view, not the data.
+    (if (is.null(ybase)) NULL else coord_cartesian(ylim = c(ybase, NA))) +
     labs(x = expression(tau), y = ylab)
 }
 
@@ -389,15 +433,23 @@ surface_figures <- function(bt, save = TRUE) {
       rate_panel(d, "sigma2_cover", expression("95% CrI coverage of " * sigma^2)) +
         labs(subtitle = "Coverage rate. Red: nominal 0.95."),
     "8. C-index" =
-      pred_panel(d, "c_index_known_marg", "c_index_known", "Uno's IPCW C-index") +
-        labs(subtitle = paste("Known-cluster test set: frailty 0 vs û_j.",
-                              "Pooled over total sample size and cluster count.")),
+      pred_bar(d, "c_index_known_marg", "c_index_known",
+               "Uno's IPCW C-index", ybase = 0.5) +
+        labs(subtitle = sprintf(paste("Known-cluster test set: the same held-out subjects",
+                                      "scored with the frailty forced to 0 and with û_j.\n",
+                                      "Pooled over total sample size and cluster count",
+                                      "(%.0f iterations per bar). Bar: mean; whiskers: IQR.",
+                                      "\ny axis starts at 0.5, the no-discrimination null.",
+                                      horizon_note(d)),
+                                n_per_bar(d))),
     "9. Integrated Brier score" =
-      pred_panel(d, "ibs_known_marg", "ibs_known",
-                 "IPCW integrated Brier score", hline = 0) +
-        labs(subtitle = paste("Known-cluster test set: frailty 0 vs û_j.",
-                              "Pooled over total sample size and cluster count.",
-                              "Red: zero.")),
+      pred_bar(d, "ibs_known_marg", "ibs_known",
+               "IPCW integrated Brier score", hline = 0) +
+        labs(subtitle = sprintf(paste("Same test set and pooling as figure 8",
+                                      "(%.0f iterations per bar).\n",
+                                      "Bar: mean; whiskers: IQR.",
+                                      "Red: zero (perfect prediction).",
+                                      horizon_note(d)), n_per_bar(d))),
     "10. Estimated surface" = surface_slice(bt)
   )
   if (save)

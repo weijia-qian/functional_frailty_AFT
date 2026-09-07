@@ -169,8 +169,20 @@ info_list <- vector("list", length = N_iter)
 ###############################################################
 ## Marginal test set: one draw shared by every iteration.
 ## New clusters -> frailty = 0 at prediction time.
+##
+## Seeded on the CELL, not the scenario.  The cell is every design factor except
+## censor_rate, so the three censoring levels of a cell share one seed.  Both
+## interaction DGMs draw T_true BEFORE applying censoring, so this makes T_true
+## byte-identical across the three and the censoring comparison PAIRED: the same
+## subjects with the same true event times, censored differently.  Seeding on
+## `scenario` instead gives each censoring level its own draw, confounding a
+## censoring effect with sampling noise.
 ###############################################################
-set.seed(scenario)
+cell_cols <- setdiff(names(params), "censor_rate")
+cell_seed <- match(do.call(paste, c(params[scenario, cell_cols, drop = FALSE], sep = "|")),
+                   unique(do.call(paste, c(params[, cell_cols, drop = FALSE], sep = "|"))))
+stopifnot(length(cell_seed) == 1L, !is.na(cell_seed))
+set.seed(cell_seed)
 
 # Deliberately NOT a mirror of the training design.  Predictions here set the
 # frailty to 0, so the test clusters exist only to inject between-cluster
@@ -210,21 +222,44 @@ Z_test    <- model.matrix(~ Z1 + Z2, data = test_data)
 cat("Test set generated: N =", nrow(test_data),
     "| event rate =", round(mean(test_data$delta), 3), "\n")
 
-# tgrid: 5th-95th percentiles of test EVENT times (not censored), so the grid
-# spans the event-time distribution including the tails.  Fixed across iterations.
-event_times_test <- test_data$Y[test_data$delta == 1]
-tgrid <- quantile(event_times_test, probs = seq(0.05, 0.95, by = 0.05))
+# tgrid: quantiles of the TRUE event-time distribution of the test set.
+#
+# Previously this used quantiles of the OBSERVED event times and was then
+# trimmed to where G(t) >= eps_G.  Both steps shrink as censoring rises, so the
+# evaluation horizon moved with the censoring rate and the metrics were not
+# comparable across it -- which is why the C-index appeared to IMPROVE and the
+# IBS to fall at 75% censoring.  That is an artefact of the moving horizon, not
+# the IPCW weighting: on identical truth with a fixed horizon, Uno's C is flat.
+#
+# T_true does not depend on censor_rate, and the cell seed above makes it
+# identical across the three censoring levels, so this horizon is common to them
+# by construction.
+#
+# HORIZON_Q is capped because censoring is C ~ Uniform(0, ub) with ub calibrated
+# to the target rate: G has BOUNDED support, so G(t) is exactly 0 -- not merely
+# small -- beyond ub, where the IPCW weight is undefined rather than unstable.
+# Measured on this DGM at 75% censoring across all nine family x tau cells, the
+# minimum G is 0.234 at q35 but 0.014 at q40 (cox, tau = 1) and 0.000 at q45.
+# NOTE this is TIGHTER than the q40 used in main_simulations.R: the interaction
+# surface gives a longer-tailed event-time distribution, so re-measure rather
+# than copying that constant if the DGM changes.
+HORIZON_Q <- 0.35
+tgrid <- quantile(test_data$T_true, probs = seq(0.05, HORIZON_Q, length.out = 19))
 tgrid <- sort(unique(tgrid))
 
-# Trim tgrid to where the IPCW weight 1/G(t) is estimable, using the test set's
-# own censoring distribution.  Both are fixed across iterations, so the horizon
-# is constant within a scenario and every replicate estimates the same
-# functional.  Estimating G on the training data instead is what produced the
-# IBS blow-ups: its reverse KM hits 0 at max(time_train).
+# G is still needed for the IPCW weights themselves, and the eps_G guard is kept
+# as a safety net -- but with the horizon fixed below ub it should never bite.
+# Warn loudly rather than silently shortening the horizon if it ever does.
 eps_G      <- 0.05
 km_cens_te <- survival::survfit(survival::Surv(test_data$Y, 1 - test_data$delta) ~ 1)
 G_test     <- stats::stepfun(km_cens_te$time, c(1, km_cens_te$surv))
-tgrid      <- tgrid[G_test(tgrid) >= eps_G]
+if (any(G_test(tgrid) < eps_G)) {
+  warning(sprintf(paste("Scenario %d: G(t) < %.2f at %d of %d grid points;",
+                        "the horizon is NO LONGER common across censoring levels.",
+                        "Lower HORIZON_Q (currently %.2f)."),
+                  scenario, eps_G, sum(G_test(tgrid) < eps_G), length(tgrid), HORIZON_Q))
+  tgrid <- tgrid[G_test(tgrid) >= eps_G]
+}
 stopifnot(length(tgrid) >= 2L)
 
 # Shared truncation time for both predictive metrics.  Uno's C-index weights by
@@ -271,6 +306,9 @@ surf     <- list(mean = mat_grid(), sd = mat_grid(),
 # ni_surf  <- list(mean = mat_s(), sd = mat_s(), q025 = mat_s(), q975 = mat_s())
 
 # Per-iteration seeds
+# Drawn from the cell stream seeded above, so the three censoring levels of a
+# cell also share their per-iteration training seeds: same subjects, same true
+# event times, only the censoring differs.
 seeds <- sample.int(1e8, N_iter)
 
 for(iter in 1:N_iter){
@@ -567,13 +605,17 @@ for(iter in 1:N_iter){
     # conditional.  Fail loudly instead.
     stopifnot(all(as.character(known_data$cluster_id) %in% fit$meta$cluster_levels))
 
-    # Reuse the marginal horizon so the two evaluations are on a common scale,
-    # trimmed to where the known-cluster set's own censoring KM supports IPCW.
+    # The known-cluster set is redrawn every iteration, so trimming its grid by
+    # its own G would make the horizon vary across iterations AND across
+    # censoring levels -- reintroducing exactly the confound the fixed tgrid
+    # removes.  Hold the horizon fixed and warn instead of silently shortening.
     km_known    <- survival::survfit(survival::Surv(known_data$Y, 1 - known_data$delta) ~ 1)
     G_known     <- stats::stepfun(km_known$time, c(1, km_known$surv))
-    tgrid_known <- tgrid[G_known(tgrid) >= eps_G]
-    stopifnot(length(tgrid_known) >= 2L)
-    tau_known   <- max(tgrid_known)
+    tgrid_known <- tgrid
+    tau_known   <- tau_eval
+    if (any(G_known(tgrid_known) < eps_G))
+      warning(sprintf("Iter %d: known-set G(t) < %.2f at %d of %d grid points.",
+                      iter, eps_G, sum(G_known(tgrid_known) < eps_G), length(tgrid_known)))
 
     eval_known <- function(cid) {
       lk <- predict_gibbs_interaction(
@@ -826,6 +868,8 @@ for(iter in 1:N_iter){
       sigma_dgm   = sigma_dgm,  # scale param handed to the AFT DGM (NA for Cox)
       rho         = rho_dgm,    # Weibull shape used by the Cox DGM (NA otherwise)
       censor_rate = censor_rate,
+      tau_eval    = tau_eval,      # evaluation horizon; common across censoring
+      n_tgrid     = length(tgrid),
       event_rate  = mean(data$delta),
       time        = time # Gibbs seconds, interaction model
       # time_ni     = time_ni    # Gibbs seconds, no-interaction comparator
