@@ -80,8 +80,8 @@ source(here("source", "fcoxFr_supp.R"))   # comparator: fpcr / fpcr_predict
 ###############################################################
 family = c("lognormal", "cox", "cox_tv")
 # family = c("lognormal", "loglogistic", "cox", "cox_tv")
-N_total = c(4000)
-n_cluster = c(25, 50, 75)
+N_total = c(1000, 2000, 4000)
+n_cluster = c(50)
 nS = c(100)
 beta_type = c("peak1")
 # beta_type = c("monotone", "peak1", "peak2", "wavy")
@@ -89,14 +89,14 @@ tau = c(0.2, 0.5, 1)  # AFT-scale (log-time) frailty SD target, common to both f
 sigma = c(1)       # AFT-scale (log-time) RESIDUAL SD target, common to both
                    # families.  Each DGM takes a different scale parameter to
                    # hit it.  See below.
-censor_rate = c(0.5)
+censor_rate = c(0.25, 0.5, 0.75)
 
 # Strength of the PH violation in the "cox_tv" arm: beta(s, t) = beta(s)*(1 + psi*log t),
 # so the subject's Weibull shape becomes rho + psi*eta.  psi = 0 would BE the
 # "cox" arm; 0.3 gives a violation cox.zph rejects at p < 1e-40 (N = 8000, no
 # frailty) while keeping every rho_i comfortably positive.
 PSI_TV = 0.3
-N_iter = 100
+N_iter = 200
 N_test = 1000      # out-of-sample test set size (new subjects, NEW clusters)
 N_known = 1000     # out-of-sample test set size (new subjects, KNOWN clusters);
                    # drawn per iteration sharing the training data's frailties
@@ -119,7 +119,7 @@ params = expand.grid(family = family,
 
 ## define number of simulations and parameter scenarios
 if(doLocal) {
-  scenario = 1
+  scenario = 2
   N_iter = 1
 }else{
   # defined from batch script params
@@ -235,11 +235,23 @@ info_list <- vector("list", length = N_iter)
 ## Marginal test set: one draw shared by every iteration.
 ## New clusters -> frailty = 0 at prediction time.
 ##
-## The reseed is NOT for reproducibility -- set.seed(scenario) already gives
-## that.  It decouples the test set from N_iter: without it the RNG state here
-## would depend on how many draws sample.int(1e8, N_iter) consumed.
+## The reseed is NOT for reproducibility -- set.seed() already gives that.  It
+## decouples the test set from N_iter: without it the RNG state here would
+## depend on how many draws sample.int(1e8, N_iter) consumed.
+##
+## Seeded on the CELL, not the scenario.  The cell is every design factor except
+## censor_rate, so the three censoring levels of a cell share one seed.  Because
+## every DGM consumes censor_rate only AFTER drawing T_true, that makes T_true
+## byte-identical across the three, and the censoring comparison becomes PAIRED:
+## the same subjects with the same true event times, censored differently.  The
+## alternative -- seeding on `scenario` -- gives each censoring level its own
+## draw, so a censoring effect is confounded with sampling noise.
 ###############################################################
-set.seed(scenario)
+cell_cols <- setdiff(names(params), "censor_rate")
+cell_seed <- match(do.call(paste, c(params[scenario, cell_cols, drop = FALSE], sep = "|")),
+                   unique(do.call(paste, c(params[, cell_cols, drop = FALSE], sep = "|"))))
+stopifnot(length(cell_seed) == 1L, !is.na(cell_seed))
+set.seed(cell_seed)
 
 # Deliberately NOT a mirror of the training design.  Predictions here set the
 # frailty to 0, so the test clusters exist only to inject between-cluster
@@ -255,21 +267,43 @@ s_grid    <- dgm_s_grid(sim_test)
 cat("Test set generated: N =", nrow(test_data),
     "| event rate =", round(mean(test_data$delta), 3), "\n")
 
-# tgrid: 5th-95th percentiles of test EVENT times (not censored), so the grid
-# spans the event-time distribution including the tails.  Fixed across iterations.
-event_times_test <- test_data$Y[test_data$delta == 1]
-tgrid <- quantile(event_times_test, probs = seq(0.05, 0.95, by = 0.05))
+# tgrid: quantiles of the TRUE event-time distribution of the test set.
+#
+# Previously this used quantiles of the OBSERVED event times and was then
+# trimmed to where G(t) >= eps_G.  Both steps shrink as censoring rises, so the
+# evaluation horizon moved with the censoring rate and the metrics were not
+# comparable across it.  That -- not the IPCW weighting -- is what made both the
+# C-index and the IBS improve with heavier censoring: measured on identical
+# truth with a FIXED horizon, Uno's C is flat (0.7396 / 0.7385 / 0.7398 at
+# 25 / 50 / 75% censoring) but rises to 0.7446 with the adaptive horizon.
+#
+# T_true does not depend on censor_rate, and the cell seed above makes it
+# identical across the three censoring levels, so this horizon is common to them
+# by construction.
+#
+# HORIZON_Q is capped at 0.40 because censoring is C ~ Uniform(0, ub) with ub
+# calibrated to the target rate: G has BOUNDED support, so G(t) is exactly 0 --
+# not merely small -- beyond ub, where the IPCW weight is undefined rather than
+# unstable.  At 75% censoring, measured across all nine family x tau cells,
+# G(q40) is 0.118-0.211 while G(q50) is 0.000 everywhere.  A longer horizon
+# would need a censoring distribution with unbounded support.
+HORIZON_Q <- 0.40
+tgrid <- quantile(test_data$T_true, probs = seq(0.05, HORIZON_Q, length.out = 19))
 tgrid <- sort(unique(tgrid))
 
-# Trim tgrid to where the IPCW weight 1/G(t) is estimable, using the test set's
-# own censoring distribution.  Both are fixed across iterations, so the horizon
-# is constant within a scenario and every replicate estimates the same
-# functional.  Estimating G on the training data instead is what produced the
-# IBS blow-ups: its reverse KM hits 0 at max(time_train).
+# G is still needed for the IPCW weights themselves, and the eps_G guard is kept
+# as a safety net -- but with the horizon fixed below ub it should never bite.
+# Warn loudly rather than silently shortening the horizon if it ever does.
 eps_G      <- 0.05
 km_cens_te <- survival::survfit(survival::Surv(test_data$Y, 1 - test_data$delta) ~ 1)
 G_test     <- stats::stepfun(km_cens_te$time, c(1, km_cens_te$surv))
-tgrid      <- tgrid[G_test(tgrid) >= eps_G]
+if (any(G_test(tgrid) < eps_G)) {
+  warning(sprintf(paste("Scenario %d: G(t) < %.2f at %d of %d grid points;",
+                        "the horizon is NO LONGER common across censoring levels.",
+                        "Lower HORIZON_Q (currently %.2f)."),
+                  scenario, eps_G, sum(G_test(tgrid) < eps_G), length(tgrid), HORIZON_Q))
+  tgrid <- tgrid[G_test(tgrid) >= eps_G]
+}
 stopifnot(length(tgrid) >= 2L)
 
 # Shared truncation time for both predictive metrics.  Uno's C-index weights by
@@ -300,6 +334,9 @@ bmat     <- list(mean = mat_grid(), sd = mat_grid(),
                  q025 = mat_grid(), q975 = mat_grid())
 
 # Per-iteration seeds
+# Drawn from the cell stream seeded above, so the three censoring levels of a
+# cell also share their per-iteration training seeds: same subjects, same true
+# event times, only the censoring differs.
 seeds <- sample.int(1e8, N_iter)
 
 for(iter in 1:N_iter){
@@ -465,11 +502,17 @@ for(iter in 1:N_iter){
     # conditional.  Fail loudly instead.
     stopifnot(all(as.character(known_data$cluster_id) %in% fit$meta$cluster_levels))
 
+    # The known-cluster set is redrawn every iteration, so trimming its grid by
+    # its own G would make the horizon vary across iterations AND across
+    # censoring levels -- reintroducing exactly the confound the fixed tgrid
+    # removes.  Hold the horizon fixed and warn instead of silently shortening.
     km_known    <- survival::survfit(survival::Surv(known_data$Y, 1 - known_data$delta) ~ 1)
     G_known     <- stats::stepfun(km_known$time, c(1, km_known$surv))
-    tgrid_known <- tgrid[G_known(tgrid) >= eps_G]
-    stopifnot(length(tgrid_known) >= 2L)
-    tau_known   <- max(tgrid_known)
+    tgrid_known <- tgrid
+    tau_known   <- tau_eval
+    if (any(G_known(tgrid_known) < eps_G))
+      warning(sprintf("Iter %d: known-set G(t) < %.2f at %d of %d grid points.",
+                      iter, eps_G, sum(G_known(tgrid_known) < eps_G), length(tgrid_known)))
 
     eval_known <- function(cid) {
       lk <- predict_gibbs_frailty(fit, X_new = known_data$X, Z_new = Z_known,
@@ -505,9 +548,17 @@ for(iter in 1:N_iter){
     ## sets, so lf_c_index / lf_ibs pair directly with c_index / ibs.
     ##
     ## Three things it does NOT give, which is why its columns are a subset:
-    ##   * no interval estimates for beta(s), so no coverage
-    ##   * beta_hat is on the LOG-HAZARD scale, so only its shape (correlation
-    ##     with the truth, which is scale free) is comparable across families
+    ##   * point estimates only.  fpcr() keeps the coefficient column of the
+    ##     coxme fit and drops the se(coef) column beside it, and coxme reports
+    ##     no standard error for the frailty variance at all.  Wald intervals for
+    ##     beta(s) and the Z slopes could be reconstructed from the stored
+    ##     $model (bhat is a linear map of the fixed coefficients, so a delta
+    ##     method applies), but the comparator is used as built, so there are no
+    ##     lf_* coverage columns and every coverage figure is AFT-only
+    ##   * beta_hat is on the LOG-HAZARD scale.  The Cox arms have a known rho,
+    ##     so -bhat/rho puts it on the AFT scale and lf_beta_ise is defined; for
+    ##     the AFT families rho is undefined and only the scale-free shape
+    ##     correlation is comparable
     ##   * fpcr_predict() returns the FIXED-effect predictor only, so the
     ##     conditional score has to add ranef() by hand
     ###############################################################
@@ -522,8 +573,46 @@ for(iter in 1:N_iter){
     # matches -beta_true up to a positive factor.  Correlation is scale free and
     # therefore the one beta comparison valid for every family.
     lf_beta_cor <- suppressWarnings(cor(as.vector(fit_lf$bhat), -beta_true))
+
+    # ISE on the SAME AFT scale the Bayesian fit is scored on.  beta_AFT =
+    # -beta_Cox/rho is the identical transform already used to build the Cox
+    # targets, and rho only fixes a common reporting scale -- it gives neither
+    # model information about the data, so the comparison is fair.  Defined
+    # wherever rho is, i.e. for the Cox arms; NA for the AFT families, which
+    # have no PH representation and hence no rho.
+    lf_bhat     <- as.vector(fit_lf$bhat)
+    lf_beta_aft <- if (is.na(rho_dgm)) NA_real_ else -lf_bhat / rho_dgm
+    lf_beta_ise <- if (is.na(rho_dgm)) NA_real_ else mean((lf_beta_aft - beta_true)^2)
+
+    # A scale-free companion that IS defined for every family: the residual
+    # after rescaling bhat optimally onto the AFT target.  For the Cox arms the
+    # fitted factor should land near -1/rho, which is a check on the transform.
+    lf_scale        <- sum(lf_bhat * beta_true) / sum(lf_bhat^2)
+    lf_beta_ise_opt <- mean((lf_scale * lf_bhat - beta_true)^2)
+    # gammahat is the Z block of fixef(): the last ncol(Z)-1 coefficients after
+    # the FPCA scores.  Verified against coxme::fixef().
     lf_gamma_est <- unname(fit_lf$gammahat)
+    stopifnot(length(lf_gamma_est) == ncol(Z) - 1L)
+    # gamma_implied[-1] are the Z slopes on the AFT scale; index 0 is the
+    # intercept, which a Cox model does not have (it is absorbed into the
+    # baseline hazard), so there is nothing to pair it with.
+    lf_gamma_aft  <- if (is.na(rho_dgm)) rep(NA_real_, length(lf_gamma_est)) else
+                     -lf_gamma_est / rho_dgm
+    lf_gamma_bias <- lf_gamma_aft - gamma_implied[-1]
     lf_tau2_est  <- as.numeric(coxme::VarCorr(fit_lf$model)[[1]])
+
+    # Put the comparator on the AFT scale wherever the map exists, so its
+    # estimates are scored against the SAME targets as the Bayesian fit rather
+    # than against log-hazard-scale ones.  Inverting the Weibull baseline gives
+    #   beta_AFT = -beta_Cox/rho, gamma_AFT = -gamma_Cox/rho, tau2_AFT = tau2_Cox/rho^2
+    # -- the same transform applied to the DGM targets.  Defined only for the
+    # Cox arms: the AFT families have no PH representation and hence no rho.
+    #
+    # sigma^2 has NO counterpart.  coxme leaves the baseline hazard unspecified,
+    # so the comparator has no residual-variance parameter to transform; that
+    # comparison is structurally unavailable rather than merely unimplemented.
+    lf_tau2_aft  <- if (is.na(rho_dgm)) NA_real_ else lf_tau2_est / rho_dgm^2
+    lf_tau2_bias <- if (is.na(rho_dgm)) NA_real_ else lf_tau2_aft - tau2_implied
 
     lf_eta_train <- as.numeric(fit_lf$model$linear.predictor)
     lf_ranef     <- coxme::ranef(fit_lf$model)[[1]]
@@ -594,6 +683,11 @@ for(iter in 1:N_iter){
       # Subset of the columns above -- see the block for why.  lf_* pairs with
       # the unprefixed column of the same name.
       lf_beta_cor        = lf_beta_cor,   # shape only; beta_hat is log-hazard scale
+      lf_beta_ise        = lf_beta_ise,      # AFT scale via -bhat/rho; NA for AFT families
+      lf_beta_ise_opt    = lf_beta_ise_opt,  # after optimal rescaling; all families
+      lf_beta_scale      = lf_scale,         # the fitted factor; ~ -1/rho for Cox arms
+      lf_tau2_aft        = lf_tau2_aft,      # tau2_Cox/rho^2; NA for the AFT families
+      lf_tau2_bias       = lf_tau2_bias,     # against tau2_implied, the Bayesian fit's target
       lf_tau2_est        = lf_tau2_est,   # log-hazard scale frailty variance
       lf_c_index         = lf_marg[["c_index"]],
       lf_ibs             = lf_marg[["ibs"]],
@@ -602,7 +696,9 @@ for(iter in 1:N_iter){
       lf_c_index_known_marg = lf_marg_k[["c_index"]],
       lf_ibs_known_marg     = lf_marg_k[["ibs"]]
     )
-    df_coef[paste0("lf_gamma_est_", seq_along(lf_gamma_est))] <- as.list(lf_gamma_est)
+    df_coef[paste0("lf_gamma_est_",  seq_along(lf_gamma_est))]  <- as.list(lf_gamma_est)
+    df_coef[paste0("lf_gamma_aft_",   seq_along(lf_gamma_aft))]  <- as.list(lf_gamma_aft)
+    df_coef[paste0("lf_gamma_bias_",  seq_along(lf_gamma_bias))] <- as.list(lf_gamma_bias)
 
     idx <- seq_along(gamma_est) - 1L
     df_coef[paste0("gamma_true_",    idx)] <- as.list(gamma_true)
@@ -628,6 +724,8 @@ for(iter in 1:N_iter){
       rho         = rho_dgm,      # Weibull shape used by the Cox DGM (NA otherwise)
       psi         = if (as.character(family) == "cox_tv") PSI_TV else 0,
       censor_rate = censor_rate,
+      tau_eval    = tau_eval,      # evaluation horizon; common across censoring
+      n_tgrid     = length(tgrid),
       event_rate  = mean(data$delta),
       time        = time,        # Gibbs seconds
       time_lf     = time_lf      # comparator seconds

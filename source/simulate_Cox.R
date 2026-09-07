@@ -71,6 +71,38 @@
 # of the arm, but means beta/gamma bias should be read accordingly and the
 # predictive metrics carry the comparison.
 #
+# WHAT THE MODULATION ATTACHES TO (`psi_on`) AND FAIRNESS
+# -------------------------------------------------------
+# Subject-varying shape breaks BOTH competing models' tau^2 targets, in opposite
+# directions and by construction:
+#
+#   * The AFT model's cluster effect is -u_j/rho_i, so its true variance is
+#     tau^2 * E[1/rho_i^2] > tau^2/rho^2 by Jensen -- the nominal AFT target is
+#     biased LOW however rho_i is generated.
+#   * coxme's frailty is still exactly proportional, but the partial likelihood
+#     is misspecified in the fixed effect (a constant coefficient fitted to a
+#     time-varying one), and that misspecification propagates into the variance
+#     component, biasing tau2_hat LOW.
+#
+# So no choice of psi makes both targets exact; the design goal is BALANCE, not
+# exactness.  Measured at rho = pi/sqrt(6), tau = 0.5, N = 20000, J = 500, with
+# both models handed the true eta and each scored against its own target
+# (coxme vs an lmer fit, which is what this AFT model reduces to at zero
+# censoring), 12 replicates:
+#
+#   psi = 0                     Cox  -1.4%   AFT  -1.6%     (control: both OK)
+#   psi = 0.3, "functional"     Cox -15.0%   AFT  +5.5%
+#   psi = 0.3, "exogenous"      Cox  -9.3%   AFT  +6.3%     <- most balanced
+#   psi = 0.2, "exogenous"      Cox  -2.1%   AFT  +6.8%
+#
+# "functional" is the original arm; it is mildly unfair to the COX comparator,
+# not to the AFT model.  "exogenous" draws the shape modulation independently of
+# the covariates and of the frailty, so the PH violation is not attached to
+# anything either model parameterises, and the two biases come out closest to
+# equal and opposite.  Either way the cleanest reporting is to score each model
+# against a Monte-Carlo pseudo-true tau^2 computed from the DGM rather than
+# against the psi = 0 nominal values.
+#
 # RELATION TO THE AFT SCALE
 # -------------------------
 # Inverting the Weibull baseline gives
@@ -101,6 +133,15 @@ simulate_Cox <- function(
                               # beta(s, t) = beta(s) * (1 + psi * log t).
                               # psi = 0 is proportional hazards; psi != 0 breaks
                               # PH.  See "Violating proportional hazards" above.
+    psi_on       = c("functional", "exogenous"),
+                              # what the shape modulation attaches to when
+                              # psi != 0.  "functional": rho_i = rho + psi*eta_i,
+                              # tying the PH violation to the functional effect.
+                              # "exogenous": rho_i = rho + psi*v_i with
+                              # v_i ~ N(0, sd(eta)^2) drawn independently of all
+                              # covariates and of the frailty, so the violation
+                              # is unrelated to either model's parameters of
+                              # interest.  See "Violating proportional hazards".
     tau          = 0.5,       # frailty SD: u_j ~ N(0, tau^2)
     u            = NULL,      # optional: supply the J cluster frailties directly
                               # instead of drawing them, e.g. to generate new
@@ -110,6 +151,7 @@ simulate_Cox <- function(
 ) {
 
   beta_type <- match.arg(beta_type)
+  psi_on    <- match.arg(psi_on)
 
   # ---- 0. Cluster sizes summing exactly to N_total -------------------------
   mean_nj <- N_total / n_cluster
@@ -197,10 +239,15 @@ simulate_Cox <- function(
   #    T_i = ( E_i * rho_i / (lambda_0 * rho * exp(lp_i)) )^(1/rho_i).
   #  psi = 0 gives rho_i = rho and this collapses to the PH form
   #    T_i = ( E_i / (lambda_0 * exp(lp_i)) )^(1/rho).
-  rho_i <- rho + psi * num_int
+  psi_mod <- if (psi == 0) numeric(N) else switch(
+    psi_on,
+    functional = num_int,
+    exogenous  = rnorm(N, 0, stats::sd(num_int)))
+  rho_i <- rho + psi * psi_mod
   if (any(rho_i <= 0))
-    stop("psi = ", psi, " makes the per-subject Weibull shape non-positive for ",
-         sum(rho_i <= 0), " of ", N, " subjects (min ", round(min(rho_i), 3),
+    stop("psi = ", psi, " (psi_on = '", psi_on, "') makes the per-subject ",
+         "Weibull shape non-positive for ", sum(rho_i <= 0), " of ", N,
+         " subjects (min ", round(min(rho_i), 3),
          ").  Reduce |psi| or the scale of beta(s).")
 
   E      <- rexp(N, rate = 1)
@@ -247,6 +294,7 @@ simulate_Cox <- function(
     lambda_0   = lambda_0,
     rho        = rho,
     psi        = psi,          # 0 = proportional hazards
+    psi_on     = psi_on,       # what the shape modulation attaches to
     tau        = tau,
     u          = u_j,
     n_subjects = nj            # realised cluster sizes

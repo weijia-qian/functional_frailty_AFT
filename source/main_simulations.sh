@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --array=1-27%27
+#SBATCH --array=1-81%81
 #SBATCH --job-name=main_simulations
 #SBATCH --partition=chang
 #SBATCH --output=main_simulations.out

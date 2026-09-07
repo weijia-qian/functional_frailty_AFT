@@ -79,6 +79,18 @@ cal_Brier <- function(S_mat, time_test, event_test, time_train, event_train, tgr
 #' @param eps_G       Lower bound on G.  Grid points where G(t) < eps_G are
 #'                    dropped (the IPCW weight is not estimable there) and the
 #'                    remaining weights are clamped at eps_G as a guard.
+#' @param weighted    TRUE (default) applies the IPCW weights.  FALSE computes
+#'                    the UNWEIGHTED complete-case Brier score: every
+#'                    contributing subject gets weight 1 and the denominator is
+#'                    the number of contributors at that time point rather than
+#'                    n_test.  Subjects censored before t_star are simply
+#'                    dropped instead of being represented through the weights
+#'                    of others, which is what the IPCW correction exists to
+#'                    undo -- so the unweighted score is biased whenever
+#'                    censoring is informative about risk.  It is provided as a
+#'                    diagnostic: the grid trimming and horizon are IDENTICAL to
+#'                    the weighted call, so the two differ ONLY in the
+#'                    weighting and can be compared directly.
 #'
 #' @details
 #' Estimating G on the training data while `tgrid` is built from test event
@@ -101,7 +113,8 @@ cal_Brier <- function(S_mat, time_test, event_test, time_train, event_train, tgr
 #' @return The integrated Brier score, with attributes `horizon` (the largest
 #'   retained grid point), `n_kept` and `BS_t` (the pointwise scores).
 cal_IPCW_Brier <- function(S_mat, time_test, event_test, time_train, event_train,
-                           tgrid, G_data = c("test", "train"), eps_G = 0.05) {
+                           tgrid, G_data = c("test", "train"), eps_G = 0.05,
+                           weighted = TRUE) {
 
   G_data  <- match.arg(G_data)
   g_time  <- if (G_data == "test") time_test  else time_train
@@ -128,21 +141,27 @@ cal_IPCW_Brier <- function(S_mat, time_test, event_test, time_train, event_train
 
     # Term 1: event at or before t_star, weighted by G(T_i-)
     idx1 <- (time_test <= t_star) & (event_test == 1)
-    w1   <- pmax(G_left(time_test[idx1]), eps_G)
+    w1   <- if (weighted) pmax(G_left(time_test[idx1]), eps_G) else 1
     term1 <- (pred_S[idx1]^2) / w1
 
     # Term 2: still at risk past t_star, weighted by G(t_star)
     idx2 <- time_test > t_star
-    w2   <- pmax(G_right(t_star), eps_G)
+    w2   <- if (weighted) pmax(G_right(t_star), eps_G) else 1
     term2 <- ((1 - pred_S[idx2])^2) / w2
 
-    # Subjects censored before t_star fall into neither term.
-    BS_t[k] <- (sum(term1) + sum(term2)) / n_test
+    # Subjects censored before t_star fall into neither term.  Weighted: they
+    # are carried by the inflated weights of the others, so the denominator is
+    # the full n_test.  Unweighted: they are simply absent, so the denominator
+    # is the number of contributors -- using n_test there would shrink the score
+    # toward 0 purely because censoring removed subjects.
+    denom  <- if (weighted) n_test else max(1L, sum(idx1) + sum(idx2))
+    BS_t[k] <- (sum(term1) + sum(term2)) / denom
   }
 
   # 4. Integrate over the retained grid (trapezoidal), normalised by its span.
   dt  <- diff(tgrid)
   IBS <- sum(dt * (BS_t[-1] + BS_t[-length(BS_t)]) / 2) / (max(tgrid) - min(tgrid))
 
-  structure(IBS, horizon = max(tgrid), n_kept = length(tgrid), BS_t = BS_t)
+  structure(IBS, horizon = max(tgrid), n_kept = length(tgrid), BS_t = BS_t,
+            weighted = weighted)
 }
