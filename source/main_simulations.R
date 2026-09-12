@@ -95,7 +95,7 @@ censor_rate = c(0.25, 0.5, 0.75)
 # so the subject's Weibull shape becomes rho + psi*eta.  psi = 0 would BE the
 # "cox" arm; 0.3 gives a violation cox.zph rejects at p < 1e-40 (N = 8000, no
 # frailty) while keeping every rho_i comfortably positive.
-PSI_TV = 0.3
+PSI_TV = 0.4
 N_iter = 200
 N_test = 1000      # out-of-sample test set size (new subjects, NEW clusters)
 N_known = 1000     # out-of-sample test set size (new subjects, KNOWN clusters);
@@ -119,7 +119,7 @@ params = expand.grid(family = family,
 
 ## define number of simulations and parameter scenarios
 if(doLocal) {
-  scenario = 2
+  scenario = 3
   N_iter = 1
 }else{
   # defined from batch script params
@@ -194,6 +194,7 @@ tau_dgm <- if (is_cox) rho_dgm * tau else tau
 # offset too.
 EULER_MASCHERONI <- -digamma(1)          # 0.5772157
 LAMBDA_0         <- 0.1                  # Weibull baseline rate for the Cox DGM
+
 
 aft_beta_target <- function(beta_cox, rho) -beta_cox / rho
 

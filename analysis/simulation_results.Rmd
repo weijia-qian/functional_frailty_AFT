@@ -119,10 +119,13 @@ grid_levels <- function(v) paste(sort(unique(raw[[v]])), collapse = ", ")
 tibble::tribble(
   ~Element, ~Setting, ~Note,
   "Families (DGM)", "lognormal, Cox (Weibull PH), Cox with a time-varying effect",
-    "Error shape and, for the last arm, the PH assumption itself",
-  "Coefficient function", grid_levels("beta_type"), "B-spline beta(s); no age interaction",
+    paste("beta(s, t) = beta(s) * (1 + psi * log t) with psi = 0.3, which makes the",
+          "subject's Weibull shape rho_i = rho + psi * eta_i (eta_i = integral of",
+          "X_i(s) beta(s) ds) rather than the common rho, so no single time-constant",
+          "coefficient is correct."),
+  "Coefficient function", grid_levels("beta_type"), "B-spline beta(s)",
   "Sample size", grid_levels("N_total"), "Cluster sizes ~ Uniform(mean +/- 0.5 mean)",
-  "Clusters J", grid_levels("n_cluster"), "Fixed in this design",
+  "Clusters J", grid_levels("n_cluster"), "",
   "Frailty SD tau", grid_levels("tau"), "AFT (log-time) scale, common to all families",
   "Censoring rate", grid_levels("censor_rate"), "C ~ Uniform(0, ub), ub solved to hit the target",
   "Residual SD sigma", grid_levels("sigma"),
@@ -133,12 +136,13 @@ tibble::tribble(
   "Iterations per scenario", as.character(max(raw$iter)), "",
   "Evaluation horizon", sprintf("tau_eval = %.3f - %.3f over cells",
     min(raw$tau_eval), max(raw$tau_eval)),
-    "Quantiles of the TRUE event-time distribution, so it is COMMON across censoring levels",
+    paste("tgrid = 19 equally spaced quantiles of the TRUE event times of the test",
+          "set, from q(0.05) to q(0.40)"),
   "Test sets", "N = 1000 marginal (new clusters), N = 1000 conditional (known clusters)",
     "Marginal set fixed within a scenario; conditional set redrawn each iteration",
   "MCMC", "20,000 iterations, 10,000 burn-in, no thinning", "",
   "Priors", "gamma ~ N(0,100); sigma^2 ~ IG(3,2); tau^2 ~ IG(0.01,0.01); lambda ~ Gamma(1,1)",
-    "tau^2 prior weakened from IG(3,2), whose prior mean of 1 swamped the frailty likelihood at small tau"
+    ""
 ) |>
   kbl() |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
@@ -149,15 +153,6 @@ censoring rate), the three censoring levels of a cell share byte-identical true
 event times and differ only in which of them are observed. The censoring
 comparison is therefore **paired**, and the evaluation horizon is common across
 it by construction.
-
-```{r tbl-timing}
-raw |>
-  summarise(gibbs_median = median(time), gibbs_max = max(time),
-            comparator_median = median(time_lf),
-            total_cpu_hours = sum(time + time_lf) / 3600) |>
-  kbl(digits = 1) |>
-  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
-```
 
 # Models compared
 
@@ -176,18 +171,8 @@ tibble::tribble(
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
 ```
 
-The comparator estimates on the log-hazard scale. Where the DGM fixes a Weibull
-shape `rho`, the transform `beta_AFT = -beta_Cox/rho`, `tau2_AFT = tau2_Cox/rho^2`
-puts both models on the log-time scale and they share an axis directly. **The
-lognormal arm has no PH representation and hence no `rho`**, so the comparator's
-beta and tau^2 are structurally untransformable there: it is absent from the
-lognormal row of figures 1-4 by construction, not through missing data. The
-predictive metrics (figures 5-6) are scale free and defined for every family.
-
 `fpcr()` returns point estimates only, and `coxme` supplies no standard error
-for the frailty variance, so no coverage figure has a comparator counterpart.
-The comparator is used as built, and coverage is reported in the appendix for
-the Bayesian model alone.
+for the frailty variance, so no coverage is reported. The comparator is used as built.
 
 # Evaluation metrics
 
@@ -202,6 +187,49 @@ tibble::tribble(
   kbl() |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
 ```
+
+Both models are scored on the log-time (AFT) scale. The comparator estimates on
+the log-hazard scale, so it is transformed first: `beta_AFT = -beta_Cox/rho` and
+`tau2_AFT = tau2_Cox/rho^2`. Both transforms need a Weibull shape `rho`, which
+exists only for the Cox arms — **the lognormal arm has no PH representation and
+hence no `rho`**, so the comparator's `beta(s)` and `tau^2` are undefined there
+and it is absent from the lognormal row of figures 1-4. The predictive metrics
+(figures 5-8) need no transform and compare both models on every arm.
+
+The table below gives, for each estimand and each model, the transform applied
+and the value it is scored against under each DGM.
+
+```{r tbl-targets}
+tibble::tribble(
+  ~Quantity, ~Model, ~`Transform applied`, ~`lognormal`, ~`Cox / Weibull PH`, ~`Cox, non-PH`,
+  "beta(s)", "Functional frailty AFT", "none",
+    "+beta(s), exact", "-beta(s), exact", "-beta(s), APPROXIMATE",
+  "beta(s)", "Linear functional Cox", "beta_AFT(s) = -beta_Cox(s) / rho",
+    "unavailable (no rho)", "-beta(s), exact", "-beta(s), APPROXIMATE",
+  "tau^2", "Functional frailty AFT", "none",
+    "tau^2, exact", "tau^2, exact", "tau^2, APPROXIMATE",
+  "tau^2", "Linear functional Cox", "tau2_AFT = tau2_Cox / rho^2",
+    "unavailable (no rho)", "tau^2, exact", "tau^2, APPROXIMATE"
+) |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) |>
+  collapse_rows(columns = 1, valign = "top")
+```
+
+**Exact vs approximate.** Under the lognormal and Weibull-PH arms the fitted
+model contains the truth, so the targets above are the exact estimands. Under
+the non-PH arm neither model is correctly specified and both targets are
+pseudo-true, in opposite directions:
+
+- `beta(s)`: the truth is `beta(s)(1 + psi log t)`, so no time-constant curve is
+  correct; the `psi = 0` curve is used and the gap measures STRUCTURAL
+  misspecification, not estimation error.
+- `tau^2`: the AFT model's cluster effect is `-u_j / rho_i` with a
+  subject-specific shape, so its true variance is `tau^2 * E[1/rho_i^2]`, which
+  exceeds `tau^2` by Jensen -- the nominal target is biased LOW. The comparator's
+  frailty is still exactly proportional, but the partial likelihood is
+  misspecified in the fixed effect and that propagates into the variance
+  component, biasing its estimate LOW.
 
 ```{r fig-helpers}
 # --- Figures 1-4: two-model boxplot, x = total N, facet family x <one factor> ---
@@ -231,7 +259,10 @@ box_models <- function(d, yvar, lfvar, ylab, facet_col, hline = NULL) {
     labs(x = "total sample size N", y = ylab)
 }
 
-# --- Figures 5-6: two-model barplot, x = tau, facet family x evaluation --------
+# --- Figures 5-8: two-model barplot, facet family x evaluation ----------------
+# `xvar` selects the slice: tau (pooling the censoring rate) or the censoring
+# rate (pooling tau).  Total N is pooled either way.  Same pairing as figures
+# 1-4, where each quantity is shown once against each design factor.
 # Marginal vs conditional are the SAME held-out subjects in KNOWN clusters,
 # scored with the frailty forced to 0 and with u_hat_j respectively.  Using the
 # new-cluster test set for "marginal" would change the subjects as well as the
@@ -241,26 +272,27 @@ box_models <- function(d, yvar, lfvar, ylab, facet_col, hline = NULL) {
 # replicate noise), not the precision of the mean -- with ~900 iterations behind
 # each bar a CI of the mean would be a hairline and would say nothing about how
 # much the metric actually moves across those conditions.
-bar_models <- function(d, marg, cond, lf_marg, lf_cond, ylab, hline = NULL,
-                       ybase = NULL) {
+bar_models <- function(d, marg, cond, lf_marg, lf_cond, ylab,
+                       xvar = "tau_f", xlab = expression(tau),
+                       hline = NULL, ybase = NULL) {
   s <- d |>
-    select(family, tau_f,
+    select(family, x = all_of(xvar),
            `Functional frailty AFT.marginal (u = 0)`        = all_of(marg),
            `Functional frailty AFT.conditional (u-hat)`     = all_of(cond),
            `Linear functional Cox (fcoxFr).marginal (u = 0)`    = all_of(lf_marg),
            `Linear functional Cox (fcoxFr).conditional (u-hat)` = all_of(lf_cond)) |>
-    pivot_longer(-c(family, tau_f), names_to = c("model", "evaluation"),
+    pivot_longer(-c(family, x), names_to = c("model", "evaluation"),
                  names_sep = "\\.", values_to = "value") |>
     filter(!is.na(value)) |>
     mutate(model      = factor(model, names(model_cols)),
            evaluation = factor(evaluation,
                                c("marginal (u = 0)", "conditional (u-hat)"))) |>
-    group_by(family, tau_f, model, evaluation) |>
+    group_by(family, x, model, evaluation) |>
     summarise(m  = mean(value),
               lo = quantile(value, 0.25),
               hi = quantile(value, 0.75),
               n  = n(), .groups = "drop")
-  p <- ggplot(s, aes(x = tau_f, y = m, fill = model))
+  p <- ggplot(s, aes(x = x, y = m, fill = model))
   if (!is.null(hline))
     p <- p + geom_hline(yintercept = hline, colour = "red",
                         linetype = "dotted", linewidth = 0.6)
@@ -277,63 +309,74 @@ bar_models <- function(d, marg, cond, lf_marg, lf_cond, ylab, hline = NULL,
     # meaningful baseline rather than an arbitrary truncation.  coord_cartesian
     # clips the view without dropping data.
     (if (is.null(ybase)) NULL else coord_cartesian(ylim = c(ybase, NA))) +
-    labs(x = expression(tau), y = ylab)
+    labs(x = xlab, y = ylab)
 }
 ```
 
 ```{r build-figs}
-n_per_box <- nrow(dat) / (dplyr::n_distinct(dat$family) *
-                          dplyr::n_distinct(dat$N_f) * 3)
-n_per_bar <- nrow(dat) / (dplyr::n_distinct(dat$family) * dplyr::n_distinct(dat$tau_f))
-
-fig_keys <- c("ise_by_censoring", "ise_by_tau", "bias_tau2_by_censoring",
-              "bias_tau2_by_tau", "c_index", "ibs")
+fig_keys <- c("ise_by_tau", "ise_by_censoring",
+              "bias_tau2_by_tau", "bias_tau2_by_censoring",
+              "c_index_by_tau", "c_index_by_censoring",
+              "ibs_by_tau", "ibs_by_censoring")
 
 make_figs <- function(bt) {
-  stopifnot(length(fig_keys) == 6L)
+  stopifnot(length(fig_keys) == 8L)
   d <- filter(dat, beta_type == bt)
   list(
-    "1. ISE of beta(s), by censoring rate" =
-      box_models(d, "beta_ise", "lf_beta_ise", expression("ISE of " * beta(s)),
-                 "cens_lab", hline = 0) +
-        labs(subtitle = paste("Pooled over tau. Both models on the AFT scale:",
-                              "the comparator's log-hazard beta_hat is mapped by\n",
-                              "beta_AFT = -beta_Cox/rho. Absent from the lognormal row,",
-                              "which has no rho.")),
-    "2. ISE of beta(s), by tau" =
+    "1. ISE of beta(s), by tau" =
       box_models(d, "beta_ise", "lf_beta_ise", expression("ISE of " * beta(s)),
                  "tau_lab", hline = 0) +
         labs(subtitle = paste("Pooled over the censoring rate.",
+                              "Both models on the AFT scale.",
+                              "\nThe comparator has no rho on the lognormal arm, so its",
+                              "log-time estimate is undefined and that row shows the AFT model alone.")),
+    "2. ISE of beta(s), by censoring rate" =
+      box_models(d, "beta_ise", "lf_beta_ise", expression("ISE of " * beta(s)),
+                 "cens_lab", hline = 0) +
+        labs(subtitle = paste("Pooled over tau.",
                               "Same quantity as figure 1, sliced the other way.")),
-    "3. Bias of tau^2, by censoring rate" =
-      box_models(d, "tau2_bias", "lf_tau2_bias", expression("bias of " * tau^2),
-                 "cens_lab", hline = 0) +
-        labs(subtitle = paste("Pooled over tau. Both against the SAME AFT-scale target",
-                              "tau2_implied: the Bayesian posterior median, and\n",
-                              "the comparator's coxme variance divided by rho^2.",
-                              "Red: zero bias.")),
-    "4. Bias of tau^2, by tau" =
+    "3. Bias of tau^2, by tau" =
       box_models(d, "tau2_bias", "lf_tau2_bias", expression("bias of " * tau^2),
                  "tau_lab", hline = 0) +
-        labs(subtitle = paste("Pooled over the censoring rate.",
+        labs(subtitle = paste("Pooled over the censoring rate. Red: zero bias.")),
+    "4. Bias of tau^2, by censoring rate" =
+      box_models(d, "tau2_bias", "lf_tau2_bias", expression("bias of " * tau^2),
+                 "cens_lab", hline = 0) +
+        labs(subtitle = paste("Pooled over tau.",
                               "Same quantity as figure 3, sliced the other way.")),
-    "5. Uno's C-index" =
+    "5. Uno's C-index, by tau" =
       bar_models(d, "c_index_known_marg", "c_index_known",
                  "lf_c_index_known_marg", "lf_c_index_known",
                  "Uno's IPCW C-index", ybase = 0.5) +
-        labs(subtitle = sprintf(paste("Known-cluster test set: the same held-out subjects",
-                                      "scored with the frailty forced to 0 and with u_hat_j.\n",
-                                      "Pooled over total N and censoring rate (%.0f iterations",
-                                      "per bar). Bar: mean; whiskers: interquartile range.",
-                                      "\ny axis starts at 0.5, the no-discrimination null."), n_per_bar)),
-    "6. Integrated Brier score" =
+        labs(subtitle = paste("Known-cluster test set: the same held-out subjects",
+                              "scored with the frailty forced to 0 and with û_j.",
+                              "\nPooled over total N and censoring rate.",
+                              "Bar: mean; whiskers: interquartile range.",
+                              "\ny axis starts at 0.5, the no-discrimination null.")),
+    "6. Uno's C-index, by censoring rate" =
+      bar_models(d, "c_index_known_marg", "c_index_known",
+                 "lf_c_index_known_marg", "lf_c_index_known",
+                 "Uno's IPCW C-index",
+                 xvar = "cens_lab", xlab = "censoring rate", ybase = 0.5) +
+        labs(subtitle = paste("Pooled over total N and tau.",
+                              "Same quantity as figure 5, sliced the other way.")),
+    "7. Integrated Brier score, by tau" =
       bar_models(d, "ibs_known_marg", "ibs_known",
                  "lf_ibs_known_marg", "lf_ibs_known",
                  "IPCW integrated Brier score", hline = 0) +
-        labs(subtitle = sprintf(paste("Same test set and pooling as figure 5",
-                                      "(%.0f iterations per bar).\n",
-                                      "Bar: mean; whiskers: interquartile range.",
-                                      "Red: zero (perfect prediction)."), n_per_bar))
+        labs(subtitle = paste("Known-cluster test set: the same held-out subjects",
+                              "scored with the frailty forced to 0 and with û_j.",
+                              "\nPooled over total N and censoring rate.",
+                              "Bar: mean; whiskers: interquartile range.",
+                              "Red: zero (perfect prediction).")),
+    "8. Integrated Brier score, by censoring rate" =
+      bar_models(d, "ibs_known_marg", "ibs_known",
+                 "lf_ibs_known_marg", "lf_ibs_known",
+                 "IPCW integrated Brier score",
+                 xvar = "cens_lab", xlab = "censoring rate", hline = 0) +
+        labs(subtitle = paste("Pooled over total N and tau.",
+                              "Same quantity as figure 7, sliced the other way.",
+                              "Red: zero (perfect prediction)."))
   )
 }
 

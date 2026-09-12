@@ -61,12 +61,12 @@ eval_levels <- c("marginal (u = 0)", "conditional (û)")
 cens_cols   <- setNames(brewer.pal(5, "BuPu")[c(2, 3, 5)],
                         paste0(100 * c(0.25, 0.5, 0.75), "% censoring"))
 
-results_dir <- here::here("outputs", "20260901_interaction")
+results_dir <- here::here("outputs", "20260907_interaction")
 fig_dir     <- here::here("analysis", "figures")
 dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
 ```
 
-```{r load-data, cache=TRUE, cache.extra=length(list.files(results_dir))}
+```{r load-data, cache=TRUE, cache.extra=list(results_dir, length(list.files(results_dir)))}
 # Each .RDA holds list(info, coef, grid, s_eval, surface).  Only info and coef
 # are needed here; the surface matrices are read separately below.
 load_result <- function(path) { e <- new.env(); load(path, envir = e); e$result }
