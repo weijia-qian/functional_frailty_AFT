@@ -24,9 +24,18 @@
 # therefore reported:
 #   * TRUTH-BASED, SCALE-FREE -- comparable across the models at every kappa:
 #       surv_iae / surv_rmse  error of the predicted survival curve against the
-#                             TRUE curve, which the DGM knows exactly (no IPCW):
-#                             iae = mean_i (1/|W|) int_W |S_hat_i - S_i| dt,
-#                             rmse analogous with squares, W = [t_min, t_max]
+#                             TRUE curve, which the DGM knows exactly (no IPCW),
+#                             PROBABILITY-weighted over the 5th-80th percentiles
+#                             of the test set's true event-time distribution F:
+#                               iae = mean_i (1/0.75) int_{0.05}^{0.80}
+#                                       |S_hat_i(F^-1(p)) - S_i(F^-1(p))| dp,
+#                             rmse analogous with squares.  Every percentile
+#                             counts equally, whatever the time scale.
+#       surv_iae_early/_late  the same over the 5th-40th percentiles (inside
+#                             follow-up at every censoring level) and the
+#                             40th-80th (beyond follow-up at heavy censoring, so
+#                             it measures EXTRAPOLATION; fcoxFr's Breslow baseline
+#                             is flat after the last training event)
 #       beta_shape            || b_hat/||b_hat|| - b/||b|| ||^2 with each model's
 #                             EXPECTED sign (+ AFT, - Cox): both models are
 #                             single-index in int X beta, so the shape is their
@@ -39,6 +48,12 @@
 #     coverage; lf_beta_ise, lf_gamma_bias, lf_tau2_bias).
 # Secondary, as in main_simulations.R: Uno's IPCW C-index and the IPCW integrated
 # Brier score, with ORACLE values from the true survival function as the ceiling.
+#
+# Time grids -- quantiles of the test set's TRUE event times, so common across
+# censoring levels by construction:
+#   tgrid_surv  p = 0.05, 0.075, ..., 0.80 (31 points): survival-curve error
+#   tgrid       its points with p <= 0.40 (15 points): Uno's C at max(tgrid) and
+#               the IBS, whose IPCW weights need G(t) > 0 (inside follow-up)
 #
 # Test sets and predictions
 #   *  (no suffix)    NEW clusters, fixed per cell, frailty set to 0 (as in
@@ -57,9 +72,10 @@
 #   gamma_{true,est,bias,se,cover}_k        bias/se/cover exact; kappa = 1 only
 #   tau2_{true,est,bias,se,cover}           bias/se/cover exact; kappa = 1 only
 #   sigma2_{true,est,bias,se,cover}         bias/se/cover exact; kappa = 1 only
-#   c_index, ibs, surv_iae, surv_rmse       new clusters, frailty = 0
-#   {c_index,ibs,surv_iae,surv_rmse}_known       known clusters, u_hat
-#   {c_index,ibs,surv_iae,surv_rmse}_known_marg  same subjects, frailty = 0
+#   c_index, ibs                            new clusters, frailty = 0
+#   surv_{iae,iae_early,iae_late,rmse}      new clusters, frailty = 0
+#   {c_index,ibs,surv_*}_known              known clusters, u_hat
+#   {c_index,ibs,surv_*}_known_marg         same subjects, frailty = 0
 #   oracle_{c_index,ibs}[_known]            the true survival function's scores
 #                                           (S(t | x, u = 0) for new clusters,
 #                                           S(t | x, u_j) for known clusters)
@@ -181,12 +197,25 @@ sim_dgm <- function(N, J, u = NULL) {
 ###############################################################
 ## metric helpers
 ###############################################################
-# Window-averaged absolute / squared error of predicted against TRUE survival
-# (rows = subjects, cols = tg): trapezoidal in t, normalised by the window length.
-surv_err <- function(S_hat, S_true, tg) {
-  w <- .eh_trapz_weights(tg) / (max(tg) - min(tg))
+# Error of predicted against TRUE survival (rows = subjects, cols = the time
+# points t_k = F^-1(p_k)), PROBABILITY-weighted: trapezoidal in p and normalised
+# by the width of the p-window, so every percentile of the event-time
+# distribution counts equally.  Weighting in t instead would hand most of the
+# weight to the long right tail (78-84% to the 40th-80th percentiles).
+surv_err <- function(S_hat, S_true, p) {
+  w <- .eh_trapz_weights(p) / (max(p) - min(p))
   d <- S_hat - S_true
   c(iae = mean(abs(d) %*% w), rmse = sqrt(mean((d^2) %*% w)))
+}
+
+# Whole window (5th-80th percentile) and its early (5th-40th) and late
+# (40th-80th) parts.  p_surv, i_early and i_late are set with the test set below.
+surv_metrics <- function(S_hat, S_true) {
+  part <- function(i) surv_err(S_hat[, i, drop = FALSE], S_true[, i, drop = FALSE],
+                               p_surv[i])[["iae"]]
+  all <- surv_err(S_hat, S_true, p_surv)
+  c(surv_iae = all[["iae"]], surv_iae_early = part(i_early),
+    surv_iae_late = part(i_late), surv_rmse = all[["rmse"]])
 }
 
 # Scale-free shape error with a FIXED expected sign (0 = same shape, 4 = flipped).
@@ -232,35 +261,49 @@ s_grid    <- sim_test$s_grid
 cat("Test set generated: N =", nrow(test_data),
     "| event rate =", round(mean(test_data$delta), 3), "\n")
 
-# tgrid: quantiles of the TRUE event-time distribution of the test set, capped at
-# the 40th percentile so the censoring survivor function stays positive at 75%
-# censoring (uniform censoring has bounded support).  Common across censoring
-# levels by construction.
+# Two nested grids, both quantiles of the TRUE event-time distribution of the
+# test set, and so common across censoring levels by construction.
+#   tgrid_surv  p = 0.05, 0.075, ..., 0.80: survival-curve error.  Scored against
+#               the true curve, it needs no IPCW and may run past follow-up;
+#               there it measures extrapolation.
+#   tgrid       the points with p <= HORIZON_Q: Uno's C and the IBS.  Their IPCW
+#               weights need G(t) > 0, and uniform censoring has bounded support,
+#               so this grid stops inside follow-up even at 75% censoring.
+# tgrid is a subset of tgrid_surv so that ONE prediction serves both: every
+# extra time point costs the AFT model a pass over all posterior draws.
 HORIZON_Q <- 0.40
-tgrid <- quantile(test_data$T_true, probs = seq(0.05, HORIZON_Q, length.out = 19))
-tgrid <- sort(unique(tgrid))
+SURV_Q    <- 0.80
+p_surv     <- seq(0.05, SURV_Q, by = 0.025)
+tgrid_surv <- unname(quantile(test_data$T_true, probs = p_surv))
+stopifnot(!anyDuplicated(tgrid_surv))
+i_early <- which(p_surv <= HORIZON_Q + 1e-9)    # 5th-40th percentile
+i_late  <- which(p_surv >= HORIZON_Q - 1e-9)    # 40th-80th percentile
+i_ipcw  <- i_early                              # columns of tgrid_surv in tgrid
 
 eps_G      <- 0.05
 km_cens_te <- survival::survfit(survival::Surv(test_data$Y, 1 - test_data$delta) ~ 1)
 G_test     <- stats::stepfun(km_cens_te$time, c(1, km_cens_te$surv))
-if (any(G_test(tgrid) < eps_G)) {
-  warning(sprintf(paste("Scenario %d: G(t) < %.2f at %d of %d grid points;",
+if (any(G_test(tgrid_surv[i_ipcw]) < eps_G)) {
+  warning(sprintf(paste("Scenario %d: G(t) < %.2f at %d of %d IPCW grid points;",
                         "the horizon is NO LONGER common across censoring levels.",
                         "Lower HORIZON_Q (currently %.2f)."),
-                  scenario, eps_G, sum(G_test(tgrid) < eps_G), length(tgrid), HORIZON_Q))
-  tgrid <- tgrid[G_test(tgrid) >= eps_G]
+                  scenario, eps_G, sum(G_test(tgrid_surv[i_ipcw]) < eps_G),
+                  length(i_ipcw), HORIZON_Q))
+  i_ipcw <- i_ipcw[G_test(tgrid_surv[i_ipcw]) >= eps_G]
 }
-stopifnot(length(tgrid) >= 2L)
+stopifnot(length(i_ipcw) >= 2L)
+tgrid <- tgrid_surv[i_ipcw]
 
 tau_eval <- max(tgrid)
 cat("Evaluation horizon: tgrid has", length(tgrid), "points, tau =",
-    round(tau_eval, 4), "| G(tau) =", round(G_test(tau_eval), 4), "\n")
+    round(tau_eval, 4), "| G(tau) =", round(G_test(tau_eval), 4),
+    "| survival grid to", round(max(tgrid_surv), 4), "\n")
 
 Surv_test <- survival::Surv(test_data$Y, test_data$delta)
 
 # TRUE survival of the test subjects at frailty 0 -- the target of a
 # frailty = 0 prediction.
-S_test_true <- sim_test$surv_true(tgrid, test_data$lp, 0)
+S_test_true <- sim_test$surv_true(tgrid_surv, test_data$lp, 0)
 
 # beta(s) in model-(1) orientation, on the simulation grid.
 beta_true <- sim_test$beta
@@ -372,7 +415,7 @@ for(iter in 1:N_iter){
     ###############################################################
     pred_surv <- predict_gibbs_frailty(
       fit, X_new = test_data$X, Z_new = Z_test, cluster_id_new = NULL,
-      type = "survival", times = tgrid, level = 0.95, quantiles = FALSE)$mean
+      type = "survival", times = tgrid_surv, level = 0.95, quantiles = FALSE)$mean
 
     # Negative posterior-mean linear predictor.  Rank-equivalent to -rowSums(S)
     # for an AFT model but cannot underflow: a saturated survival matrix
@@ -387,16 +430,18 @@ for(iter in 1:N_iter){
     c_index <- survAUC::UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_test,
                              lpnew = risk_score, time = tau_eval)
     ibs <- as.numeric(cal_IPCW_Brier(
-      S_mat = pred_surv, time_test = test_data$Y, event_test = test_data$delta,
-      time_train = data$Y, event_train = data$delta, tgrid = tgrid,
-      G_data = "test", eps_G = eps_G))
-    e_test <- surv_err(pred_surv, S_test_true, tgrid)
+      S_mat = pred_surv[, i_ipcw, drop = FALSE], time_test = test_data$Y,
+      event_test = test_data$delta, time_train = data$Y, event_train = data$delta,
+      tgrid = tgrid, G_data = "test", eps_G = eps_G))
+    e_test <- surv_metrics(pred_surv, S_test_true)
 
     # Oracle: the true survival function scored the same way.
     oracle_c_index <- survAUC::UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_test,
-                                    lpnew = -rowSums(S_test_true), time = tau_eval)
+                                    lpnew = -rowSums(S_test_true[, i_ipcw, drop = FALSE]),
+                                    time = tau_eval)
     oracle_ibs <- as.numeric(cal_IPCW_Brier(
-      S_mat = S_test_true, time_test = test_data$Y, event_test = test_data$delta,
+      S_mat = S_test_true[, i_ipcw, drop = FALSE], time_test = test_data$Y,
+      event_test = test_data$delta,
       time_train = data$Y, event_train = data$delta, tgrid = tgrid,
       G_data = "test", eps_G = eps_G))
 
@@ -427,33 +472,36 @@ for(iter in 1:N_iter){
       warning(sprintf("Iter %d: known-set G(t) < %.2f at %d of %d grid points.",
                       iter, eps_G, sum(G_known(tgrid_known) < eps_G), length(tgrid_known)))
 
-    # True conditional survival of the known-cluster subjects.
-    S_known_true      <- sim_known$surv_true(tgrid_known, known_data$lp,
+    # True survival of the known-cluster subjects on the survival grid (the
+    # IPCW metrics use its first columns, i_ipcw).
+    S_known_true      <- sim_known$surv_true(tgrid_surv, known_data$lp,
                                              sim_data$u[known_data$cluster_id])
-    S_known_marg_true <- sim_known$surv_true(tgrid_known, known_data$lp, 0)
+    S_known_marg_true <- sim_known$surv_true(tgrid_surv, known_data$lp, 0)
 
     eval_known <- function(cid, S_truth) {
       lk <- predict_gibbs_frailty(fit, X_new = known_data$X, Z_new = Z_known,
               cluster_id_new = cid, type = "link", level = 0.95, quantiles = FALSE)
       sv <- predict_gibbs_frailty(fit, X_new = known_data$X, Z_new = Z_known,
-              cluster_id_new = cid, type = "survival", times = tgrid_known,
+              cluster_id_new = cid, type = "survival", times = tgrid_surv,
               level = 0.95, quantiles = FALSE)
-      e <- surv_err(sv$mean, S_truth, tgrid_known)
       c(c_index = survAUC::UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_known,
                                 lpnew = -lk$mean, time = tau_known),
         ibs = as.numeric(cal_IPCW_Brier(
-          S_mat = sv$mean, time_test = known_data$Y, event_test = known_data$delta,
-          time_train = data$Y, event_train = data$delta, tgrid = tgrid_known,
+          S_mat = sv$mean[, i_ipcw, drop = FALSE], time_test = known_data$Y,
+          event_test = known_data$delta, time_train = data$Y,
+          event_train = data$delta, tgrid = tgrid_known,
           G_data = "test", eps_G = eps_G)),
-        surv_iae = e[["iae"]], surv_rmse = e[["rmse"]])
+        surv_metrics(sv$mean, S_truth))
     }
     m_cond <- eval_known(known_data$cluster_id, S_known_true)    # uses u_hat_j
     m_marg <- eval_known(NULL, S_known_marg_true)                # frailty forced to 0
 
     oracle_c_index_known <- survAUC::UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_known,
-                                          lpnew = -rowSums(S_known_true), time = tau_known)
+                                          lpnew = -rowSums(S_known_true[, i_ipcw, drop = FALSE]),
+                                          time = tau_known)
     oracle_ibs_known <- as.numeric(cal_IPCW_Brier(
-      S_mat = S_known_true, time_test = known_data$Y, event_test = known_data$delta,
+      S_mat = S_known_true[, i_ipcw, drop = FALSE], time_test = known_data$Y,
+      event_test = known_data$delta,
       time_train = data$Y, event_train = data$delta, tgrid = tgrid_known,
       G_data = "test", eps_G = eps_G))
 
@@ -492,13 +540,15 @@ for(iter in 1:N_iter){
     lf_tau2_bias <- if (cox_exact) lf_tau2_est - tau2_true else NA_real_
 
     # coxme's linear.predictor includes the random effects, so the Breslow
-    # baseline below is the CONDITIONAL baseline.
+    # baseline below is the CONDITIONAL baseline.  It is a step function that
+    # stays flat after the last training event, so beyond follow-up fcoxFr's
+    # predicted survival stops falling -- the _late error measures that.
     lf_eta_train <- as.numeric(fit_lf$model$linear.predictor)
     lf_ranef     <- coxme::ranef(fit_lf$model)[[1]]
     lf_cor_u     <- suppressWarnings(cor(-lf_ranef[as.character(seq_len(n_cluster))], sim_data$u))
-    lf_H0        <- -log(get_breslow_survival(lf_eta_train, data$Y, data$delta, 0, tgrid))[1, ]
+    lf_H0        <- -log(get_breslow_survival(lf_eta_train, data$Y, data$delta, 0, tgrid_surv))[1, ]
 
-    lf_predict <- function(newdat, Znew, tg, S_truth, cid = NULL) {
+    lf_predict <- function(newdat, Znew, S_truth, cid = NULL) {
       pr <- fpcr_predict(fit_lf, time = newdat$Y, event = newdat$delta,
                          group = newdat$cluster_id, X = unclass(newdat$X),
                          Z = Znew[, -1, drop = FALSE], nb = 20, gp = s_grid)
@@ -507,22 +557,22 @@ for(iter in 1:N_iter){
         j <- match(as.character(cid), names(lf_ranef))
         eta <- eta + ifelse(is.na(j), 0, lf_ranef[j])
       }
-      S <- exp(-outer(exp(eta), lf_H0))           # = get_breslow_survival(lf_eta_train, ..., eta, tg)
-      e <- surv_err(S, S_truth, tg)
+      S <- exp(-outer(exp(eta), lf_H0))           # = get_breslow_survival(lf_eta_train, ..., eta, tgrid_surv)
       c(c_index = survAUC::UnoC(Surv.rsp = Surv_train,
                                 Surv.rsp.new = survival::Surv(newdat$Y, newdat$delta),
-                                lpnew = eta, time = max(tg)),
+                                lpnew = eta, time = tau_eval),
         ibs = as.numeric(cal_IPCW_Brier(
-          S_mat = S, time_test = newdat$Y, event_test = newdat$delta,
-          time_train = data$Y, event_train = data$delta, tgrid = tg,
+          S_mat = S[, i_ipcw, drop = FALSE], time_test = newdat$Y,
+          event_test = newdat$delta, time_train = data$Y,
+          event_train = data$delta, tgrid = tgrid,
           G_data = "test", eps_G = eps_G)),
-        surv_iae = e[["iae"]], surv_rmse = e[["rmse"]])
+        surv_metrics(S, S_truth))
     }
 
-    lf_marg   <- lf_predict(test_data, Z_test, tgrid, S_test_true)
-    lf_cond_k <- lf_predict(known_data, Z_known, tgrid_known, S_known_true,
+    lf_marg   <- lf_predict(test_data, Z_test, S_test_true)
+    lf_cond_k <- lf_predict(known_data, Z_known, S_known_true,
                             cid = known_data$cluster_id)
-    lf_marg_k <- lf_predict(known_data, Z_known, tgrid_known, S_known_marg_true)
+    lf_marg_k <- lf_predict(known_data, Z_known, S_known_marg_true)
 
     ###############################################################
     ## assemble
@@ -554,19 +604,25 @@ for(iter in 1:N_iter){
       # predictive, NEW clusters, frailty = 0
       c_index      = c_index,
       ibs          = ibs,
-      surv_iae     = e_test[["iae"]],
-      surv_rmse    = e_test[["rmse"]],
+      surv_iae       = e_test[["surv_iae"]],         # 5th-80th percentile
+      surv_iae_early = e_test[["surv_iae_early"]],   # 5th-40th
+      surv_iae_late  = e_test[["surv_iae_late"]],    # 40th-80th
+      surv_rmse      = e_test[["surv_rmse"]],
       oracle_c_index = oracle_c_index,
       oracle_ibs     = oracle_ibs,
       # predictive, KNOWN clusters: *_known uses u_hat_j, *_known_marg frailty 0
       c_index_known       = m_cond[["c_index"]],
       ibs_known           = m_cond[["ibs"]],
-      surv_iae_known      = m_cond[["surv_iae"]],
-      surv_rmse_known     = m_cond[["surv_rmse"]],
+      surv_iae_known       = m_cond[["surv_iae"]],
+      surv_iae_early_known = m_cond[["surv_iae_early"]],
+      surv_iae_late_known  = m_cond[["surv_iae_late"]],
+      surv_rmse_known      = m_cond[["surv_rmse"]],
       c_index_known_marg  = m_marg[["c_index"]],
       ibs_known_marg      = m_marg[["ibs"]],
-      surv_iae_known_marg = m_marg[["surv_iae"]],
-      surv_rmse_known_marg = m_marg[["surv_rmse"]],
+      surv_iae_known_marg       = m_marg[["surv_iae"]],
+      surv_iae_early_known_marg = m_marg[["surv_iae_early"]],
+      surv_iae_late_known_marg  = m_marg[["surv_iae_late"]],
+      surv_rmse_known_marg      = m_marg[["surv_rmse"]],
       oracle_c_index_known = oracle_c_index_known,
       oracle_ibs_known     = oracle_ibs_known,
       cor_u              = cor_u,
@@ -581,16 +637,22 @@ for(iter in 1:N_iter){
       lf_cor_u       = lf_cor_u,
       lf_c_index     = lf_marg[["c_index"]],
       lf_ibs         = lf_marg[["ibs"]],
-      lf_surv_iae    = lf_marg[["surv_iae"]],
-      lf_surv_rmse   = lf_marg[["surv_rmse"]],
+      lf_surv_iae       = lf_marg[["surv_iae"]],
+      lf_surv_iae_early = lf_marg[["surv_iae_early"]],
+      lf_surv_iae_late  = lf_marg[["surv_iae_late"]],
+      lf_surv_rmse      = lf_marg[["surv_rmse"]],
       lf_c_index_known       = lf_cond_k[["c_index"]],
       lf_ibs_known           = lf_cond_k[["ibs"]],
-      lf_surv_iae_known      = lf_cond_k[["surv_iae"]],
-      lf_surv_rmse_known     = lf_cond_k[["surv_rmse"]],
+      lf_surv_iae_known       = lf_cond_k[["surv_iae"]],
+      lf_surv_iae_early_known = lf_cond_k[["surv_iae_early"]],
+      lf_surv_iae_late_known  = lf_cond_k[["surv_iae_late"]],
+      lf_surv_rmse_known      = lf_cond_k[["surv_rmse"]],
       lf_c_index_known_marg  = lf_marg_k[["c_index"]],
       lf_ibs_known_marg      = lf_marg_k[["ibs"]],
-      lf_surv_iae_known_marg = lf_marg_k[["surv_iae"]],
-      lf_surv_rmse_known_marg = lf_marg_k[["surv_rmse"]]
+      lf_surv_iae_known_marg       = lf_marg_k[["surv_iae"]],
+      lf_surv_iae_early_known_marg = lf_marg_k[["surv_iae_early"]],
+      lf_surv_iae_late_known_marg  = lf_marg_k[["surv_iae_late"]],
+      lf_surv_rmse_known_marg      = lf_marg_k[["surv_rmse"]]
     )
     df_coef[paste0("lf_gamma_est_",  seq_along(lf_gamma_est))]  <- as.list(lf_gamma_est)
     df_coef[paste0("lf_gamma_bias_", seq_along(lf_gamma_bias))] <- as.list(lf_gamma_bias)
@@ -616,8 +678,10 @@ for(iter in 1:N_iter){
       tau         = tau,
       sigma       = sigma,
       censor_rate = censor_rate,
-      tau_eval    = tau_eval,      # evaluation horizon; common across censoring
+      tau_eval    = tau_eval,      # IPCW horizon (40th pct); common across censoring
       n_tgrid     = length(tgrid),
+      tau_surv    = max(tgrid_surv),  # end of the survival-error window (80th pct)
+      n_tgrid_surv = length(tgrid_surv),
       event_rate  = mean(data$delta),
       time        = time,        # Gibbs seconds
       time_lf     = time_lf      # comparator seconds

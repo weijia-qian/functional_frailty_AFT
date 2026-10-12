@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --array=1-81%81
 #SBATCH --job-name=main_simulations_new
-#SBATCH --partition=chang
+#SBATCH --partition=wrobel
 #SBATCH --output=main_simulations_new_%a.out
 #SBATCH --error=main_simulations_new_%a.err
 
