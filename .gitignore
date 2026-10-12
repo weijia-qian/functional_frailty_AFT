@@ -8,6 +8,7 @@ Frailty.Rproj
 data
 outputs
 slides
+manuscript
 
 analysis/*_cache/
 analysis/*md
@@ -19,8 +20,10 @@ drafts/*_cache/
 *out
 
 *html
+*docx
 *png
 *pptx
+*zip
 *rds
 *RData
 *rda

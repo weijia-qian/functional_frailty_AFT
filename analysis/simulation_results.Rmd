@@ -18,6 +18,7 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
 library(kableExtra)
 library(RColorBrewer)
 library(tidyverse)
+library(patchwork)
 
 theme_set(
   theme_bw(base_size = 15) +
@@ -48,6 +49,8 @@ if (is.null(results_dir)) {
 }
 fig_dir <- here::here("analysis", "figures_noint")
 dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+paper_dir <- here::here("analysis", "figures_paper")   # publication figures
+dir.create(paper_dir, showWarnings = FALSE, recursive = TRUE)
 ```
 
 ```{r load-data, cache=TRUE, cache.extra=list(results_dir, length(list.files(results_dir)))}
@@ -237,7 +240,7 @@ pseudo-true, in opposite directions:
 # of it contributes a point to the box.
 box_models <- function(d, yvar, lfvar, ylab, facet_col, hline = NULL) {
   s <- d |>
-    select(family, N_f, col = all_of(facet_col),
+    dplyr::select(family, N_f, col = all_of(facet_col),
            a = all_of(yvar), b = all_of(lfvar)) |>
     pivot_longer(c(a, b), names_to = "model", values_to = "value") |>
     mutate(model = factor(model, c("a", "b"), names(model_cols)))
@@ -276,7 +279,7 @@ bar_models <- function(d, marg, cond, lf_marg, lf_cond, ylab,
                        xvar = "tau_f", xlab = expression(tau),
                        hline = NULL, ybase = NULL) {
   s <- d |>
-    select(family, x = all_of(xvar),
+    dplyr::select(family, x = all_of(xvar),
            `Functional frailty AFT.marginal (u = 0)`        = all_of(marg),
            `Functional frailty AFT.conditional (u-hat)`     = all_of(cond),
            `Linear functional Cox (fcoxFr).marginal (u = 0)`    = all_of(lf_marg),
@@ -396,6 +399,142 @@ for (bt in avail_bt) {
     cat("\n\n## ", names(figs[[bt]])[k], " {.unnumbered}\n\n", sep = "")
     print(figs[[bt]][[k]])
   }
+}
+```
+
+# ISE of beta(s) and bias of tau^2 by sample size
+
+```{r ise-tau2-line, fig.width=13, fig.height=10}
+## Two stacked line plots against total N, one column per data-generating model,
+## colour and line type = fitted model (dashed = fcoxFr).  Point = mean over the
+## pooled iterations.
+##   Top:    mean ISE of beta(s); shape = censoring rate, pooled over tau.
+##   Bottom: mean bias of tau^2;  shape = true tau,     pooled over censoring.
+## Both models' tau^2 are scored against the same AFT-scale target (tau2_implied).
+## The comparator has no rho on the lognormal arm, so only the AFT model appears
+## in that column.
+relabel_dgm <- function(f) fct_recode(f, "lognormal AFT" = "lognormal",
+                                      "Weibull PH"    = "Cox / Weibull PH",
+                                      "non-PH"        = "Cox, non-PH")
+
+# Mean of one metric per model at each (beta_type, DGM, N, `by`), pooling the rest.
+line_dat <- function(aft_col, lf_col, by) {
+  dat |>
+    dplyr::select(beta_type, family, N_total, all_of(by),
+                  `Functional frailty AFT`         = all_of(aft_col),
+                  `Linear functional Cox (fcoxFr)` = all_of(lf_col)) |>
+    pivot_longer(c(`Functional frailty AFT`, `Linear functional Cox (fcoxFr)`),
+                 names_to = "model", values_to = "value") |>
+    filter(!is.na(value)) |>
+    group_by(across(all_of(c("beta_type", "family", "N_total", by, "model")))) |>
+    summarise(m = mean(value), .groups = "drop") |>
+    mutate(model = factor(model, names(model_cols)), family = relabel_dgm(family))
+}
+
+ise_line <- line_dat("beta_ise", "lf_beta_ise", "censor_rate") |>
+  mutate(shp = factor(paste0(100 * censor_rate, "%"),
+                      levels = paste0(100 * sort(unique(censor_rate)), "%")))
+tau2_line <- line_dat("tau2_bias", "lf_tau2_bias", "tau") |>
+  mutate(shp = factor(tau, levels = sort(unique(tau))))
+
+# Each row keeps its own shape legend on the right -- the same marker means a
+# censoring rate in one row and a tau in the other, so pooling them into one
+# legend row would invite misreading.  The model legend (colour + line type) is
+# shared and shown once, below the bottom row.
+model_lty <- setNames(c("solid", "dashed"), names(model_cols))
+line_plot <- function(d, ylab, shape_name, show_colour, hline = NULL) {
+  p <- ggplot(d, aes(N_total, m, colour = model, linetype = model, shape = shp,
+                     group = interaction(model, shp)))
+  if (!is.null(hline))   # dotted, so it is not mistaken for a dashed fcoxFr line
+    p <- p + geom_hline(yintercept = hline, colour = "grey40", linetype = "dotted",
+                        linewidth = 0.5)
+  p +
+    geom_line(linewidth = 0.7) +
+    geom_point(size = 2.6) +
+    facet_grid(. ~ family) +
+    scale_x_continuous(trans = "log2", breaks = sort(unique(d$N_total))) +
+    scale_colour_manual(values = model_cols, name = NULL) +
+    scale_linetype_manual(values = model_lty, name = NULL) +
+    scale_shape_discrete(name = shape_name) +
+    labs(x = "Total sample size", y = ylab) +
+    guides(colour   = if (show_colour) guide_legend(position = "bottom", nrow = 1,
+                        override.aes = list(shape = NA, linewidth = 0.9)) else "none",
+           linetype = if (show_colour) guide_legend(position = "bottom", nrow = 1) else "none",
+           shape    = guide_legend(position = "right",
+                        override.aes = list(linetype = 0, colour = "grey30"))) +
+    theme(panel.spacing    = unit(1.5, "lines"),   # keep adjacent panels' end labels apart
+          legend.key.width = unit(1.4, "cm"))      # long enough to show the dashes
+}
+
+for (bt in avail_bt) {
+  p_ise_line  <- line_plot(filter(ise_line, beta_type == bt),
+                           expression("Mean ISE of " * beta(s)), "Censoring",
+                           show_colour = FALSE)
+  p_tau2_line <- line_plot(filter(tau2_line, beta_type == bt),
+                           expression("Mean bias of " * tau^2), expression("True " * tau),
+                           show_colour = TRUE, hline = 0)
+  p_ise_tau2 <- p_ise_line / p_tau2_line +
+    plot_layout(axis_titles = "collect")
+  print(p_ise_tau2)
+  save_fig(p_ise_tau2, sprintf("fig_ise_tau2_line_%s", bt), w = 13, h = 10)
+  ggsave(file.path(paper_dir, sprintf("fig_sim_ise_tau2%s.png",
+                                      if (length(avail_bt) > 1) paste0("_", bt) else "")),
+         p_ise_tau2, width = 13, height = 10, dpi = 500, bg = "white")
+}
+```
+
+# C-index by tau
+
+```{r cindex-line, fig.width=10, fig.height=8}
+## Line-plot version of figure 5: Uno's C-index against true tau, one line per
+## model; rows = data-generating model, columns = how the frailty is used.
+## Known-cluster test set: the same held-out subjects scored with the frailty
+## forced to 0 (marginal) and with u_hat_j (conditional).  Pooled over total N and
+## censoring rate.  Point = mean; whiskers = interquartile range.
+cidx_line <- dat |>
+  dplyr::select(beta_type, family, tau,
+                `Functional frailty AFT.marginal (u = 0)`            = c_index_known_marg,
+                `Functional frailty AFT.conditional (û)`             = c_index_known,
+                `Linear functional Cox (fcoxFr).marginal (u = 0)`    = lf_c_index_known_marg,
+                `Linear functional Cox (fcoxFr).conditional (û)`     = lf_c_index_known) |>
+  pivot_longer(-c(beta_type, family, tau), names_to = c("model", "evaluation"),
+               names_sep = "\\.", values_to = "value") |>
+  filter(!is.na(value)) |>
+  group_by(beta_type, family, tau, model, evaluation) |>
+  summarise(m  = mean(value),
+            lo = quantile(value, 0.25),
+            hi = quantile(value, 0.75), .groups = "drop") |>
+  mutate(model      = factor(model, names(model_cols)),
+         evaluation = factor(evaluation, c("marginal (u = 0)", "conditional (û)")),
+         family     = relabel_dgm(family))
+
+# The two models' C-indexes nearly coincide, so they get different markers and
+# line types (dashed = fcoxFr, as in the ISE / tau^2 figure) as well as colours,
+# and a small horizontal offset to keep both lines visible.
+pd <- position_dodge(width = 0.06)
+for (bt in avail_bt) {
+  p_cidx_line <- cidx_line |>
+    filter(beta_type == bt) |>
+    ggplot(aes(tau, m, colour = model, shape = model, linetype = model, group = model)) +
+    # whiskers stay solid; show.legend = FALSE so their key doesn't cover the dashes
+    geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.05, linewidth = 0.4,
+                  linetype = "solid", position = pd, show.legend = FALSE) +
+    geom_line(linewidth = 0.7, position = pd) +
+    geom_point(size = 2.6, position = pd) +
+    facet_grid(family ~ evaluation) +
+    scale_x_continuous(breaks = sort(unique(dat$tau)),
+                       labels = as.character(sort(unique(dat$tau)))) +   # "1", not "1.0"
+    scale_colour_manual(values = model_cols, name = NULL) +
+    scale_shape_discrete(name = NULL) +
+    scale_linetype_manual(values = model_lty, name = NULL) +
+    labs(x = expression("True " * tau), y = "Uno's IPCW C-index") +
+    theme(panel.spacing    = unit(1.2, "lines"),
+          legend.key.width = unit(1.4, "cm"))   # long enough to show the dashes
+  print(p_cidx_line)
+  save_fig(p_cidx_line, sprintf("fig_cindex_line_%s", bt), w = 10, h = 8)
+  ggsave(file.path(paper_dir, sprintf("fig_sim_cindex%s.png",
+                                      if (length(avail_bt) > 1) paste0("_", bt) else "")),
+         p_cidx_line, width = 10, height = 8, dpi = 500, bg = "white")
 }
 ```
 

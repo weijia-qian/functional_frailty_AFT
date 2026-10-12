@@ -19,6 +19,9 @@ library(mgcv)
 devtools::install_github("weijia-qian/funAFT", force = TRUE)
 library(funAFT)
 library(fcoxFr)
+library(tictoc)
+library(patchwork)
+
 source(here("source", "gibbs.R"))
 source(here("source", "gibbs_frailty_interaction.R"))
 source(here("source", "predict_gibbs.R"))
@@ -26,6 +29,20 @@ source(here("source", "predict_gibbs_interaction.R"))
 source(here("source", "cal_Brier.R"))
 source(here("source", "fcoxFr_supp.R"))
 data <- readRDS(here("data", "nhanes_with_demo.rds"))
+
+out_dir <- here("analysis", "figures_paper")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+theme_set(
+  theme_bw(base_size = 15) +
+    theme(legend.position   = "bottom",
+          panel.grid.minor  = element_blank(),
+          strip.background  = element_rect(fill = "grey92", colour = NA),
+          strip.text        = element_text(face = "bold", size = 13),
+          plot.subtitle     = element_text(size = 12),
+          legend.text       = element_text(size = 13),
+          legend.title      = element_text(size = 13))
+)
 ```
 
 
@@ -47,6 +64,90 @@ data2 <- data %>%
                           include.lowest = TRUE))
 data2$CHD <- droplevels(data2$CHD)
 
+# define s_grid (length P)
+# s_grid <- seq(1/60, 24, length = 1440)
+s_grid <- seq(0, 1, len = 1440)
+
+# survival outcome
+time <- data2$time
+status <- data2$event
+
+# cluster id
+cluster_id <- data2$STRAPSU
+
+# functional covariate
+X <- data2$MIMS
+age <- data2$age
+
+# scalar covariates design matrix Z
+# Columns are: (Intercept), age_in_years, bmi
+# Z <- model.matrix(~ age + gender + BMI + CHD, data = data2)
+Z <- model.matrix(~ gender + BMI + CHD, data = data2)
+```
+
+```{r exploratory analysis}
+## Mean MIMS difference (alive - deceased) by time of day x age band.
+## Built for two band widths -- 5-year (fig_nhanes.png) and 2-year
+## (fig_nhanes_2yr.png).  Age is top-coded at 80 in NHANES, so the top band is
+## "80+" in both.  The 2-year bands are noisier: several under age 60 rest on only
+## 10-20 deaths.
+mims_mat <- unclass(data2$MIMS)
+tod_bin  <- ceiling(seq_len(ncol(mims_mat)) / 180)          # 8 windows x 180 min
+tod_lab  <- sprintf("%02d-%02d", seq(0, 21, 3), seq(3, 24, 3))
+mims_3h  <- sapply(1:8, function(b) rowMeans(mims_mat[, tod_bin == b, drop = FALSE]))
+colnames(mims_3h) <- tod_lab
+
+# band:        width of the age bands in years (must divide 30)
+# label_every: spacing of the age labels on the y-axis
+heat_plot <- function(band, label_every = band) {
+  edges <- seq(50, 80, band)
+  heat_dat <- as_tibble(mims_3h) |>
+    mutate(age_band = cut(data2$age, breaks = c(edges, Inf), right = FALSE),
+           status   = if_else(data2$event == 1, "deceased", "alive")) |>
+    pivot_longer(all_of(tod_lab), names_to = "tod", values_to = "mims") |>
+    group_by(age_band, tod, status) |>
+    summarise(mean_mims = mean(mims), n = n(), .groups = "drop") |>
+    pivot_wider(names_from = status, values_from = c(mean_mims, n)) |>
+    mutate(diff = mean_mims_alive - mean_mims_deceased,
+           tod  = factor(tod, levels = tod_lab))
+  stopifnot(nrow(heat_dat) == 8 * length(edges), !anyNA(heat_dat$diff))
+
+  # Tiles sit on numeric axes so the tick labels can mark bin EDGES: 3-hour
+  # windows on x, age bands on y.
+  heat_dat <- heat_dat |>
+    mutate(x = (as.integer(tod) - 1) * 3 + 1.5,
+           y = 50 + (as.integer(age_band) - 1) * band + band / 2)
+  y_lab <- seq(50, 80, label_every)
+
+  ggplot(heat_dat, aes(x, y, fill = diff)) +
+    geom_tile(width = 3, height = band, colour = "white", linewidth = 0.5) +
+    scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                         midpoint = 0,
+                         name = "Mean MIMS (alive - deceased)") +
+    scale_x_continuous(breaks = seq(0, 24, 3),
+                       labels = c("12 AM", "3 AM", "6 AM", "9 AM", "12 PM",
+                                  "3 PM", "6 PM", "9 PM", "12 AM"),
+                       expand = c(0, 0)) +
+    scale_y_continuous(breaks = c(y_lab, 80 + band),
+                       labels = c(y_lab, ""),   # top band is 80+ (top-coded)
+                       expand = c(0, 0)) +
+    labs(x = "Time of day", y = "Age (years)") +
+    theme_minimal() +
+    theme(panel.grid = element_blank(),
+          legend.position="bottom",
+          plot.margin = margin(5.5, 20, 5.5, 5.5))
+}
+
+p_tile     <- heat_plot(band = 5)
+p_tile_2yr <- heat_plot(band = 2, label_every = 10)   # every 2-year edge would crowd the axis
+
+ggsave(file.path(out_dir, "fig_nhanes.png"),
+       plot = p_tile, width = 5, height = 5, dpi = 500, bg = "white")
+ggsave(file.path(out_dir, "fig_nhanes_2yr.png"),
+       plot = p_tile_2yr, width = 5, height = 5, dpi = 500, bg = "white")
+```
+
+```{r ph assumption}
 # Fit a regular Cox model and check PH assumption
 fit_regular_cox <- coxph(Surv(time, event) ~ age_group + gender + BMI + CHD + MIMS_group, 
                          data = data2)
@@ -92,39 +193,10 @@ ggsurvplot(
 )
 ```
 
-```{r}
-test <- data2 %>%
-  group_by(STRAPSU) %>%
-  summarise(n_unique_SEQN = n_distinct(SEQN))
-
-summary(test$n_unique_SEQN)
-```
-
-```{r data cleaning}
-# define s_grid (length P)
-# s_grid <- seq(1/60, 24, length = 1440)
-s_grid <- seq(0, 1, len = 1440)
-
-# survival outcome
-time <- data2$time
-status <- data2$event
-
-# cluster id
-cluster_id <- data2$STRAPSU
-
-# functional covariate
-X <- data2$MIMS
-age <- data2$age
-
-# scalar covariates design matrix Z
-# Columns are: (Intercept), age_in_years, bmi
-# Z <- model.matrix(~ age + gender + BMI + CHD, data = data2)
-Z <- model.matrix(~ gender + BMI + CHD, data = data2)
-```
-
-
 ```{r gibbs sampler}
 ### run Gibbs sampler
+tic()
+
 fit_bayes_int <- gibbs_frailty_interaction(
   time = time,
   status = status,
@@ -134,8 +206,8 @@ fit_bayes_int <- gibbs_frailty_interaction(
   age = age,
   s_grid = s_grid,
   # tuning / priors
-  K_s = 25,
-  K_age = 20,
+  K_s = 15,
+  K_age = 10,
   lambda_init = 5000,         
   A_lambda = 1, B_lambda = 0.1, 
   var_gamma = 100,
@@ -148,7 +220,8 @@ fit_bayes_int <- gibbs_frailty_interaction(
   verbose = TRUE
 )
 
-
+time_stamp <- toc(quiet = TRUE)
+time <- time_stamp$toc - time_stamp$tic
 # saveRDS(fit_bayes_int, file = "fit_bayes_int_k20.rds")
 ```
 
@@ -159,39 +232,108 @@ print(apply(fit_bayes_int$gamma, 2, quantile, probs = c(0.025, 0.5, 0.975)))
 # sigma^2, tau^2
 quantile(fit_bayes_int$sigma2, c(0.025, 0.5, 0.975))
 quantile(fit_bayes_int$tau2,   c(0.025, 0.5, 0.975))
-hist(colMeans(fit_bayes_int$u))
 ```
 
+```{r frailty histogram}
+### Histogram of estimated cluster frailties -- figure for the talk.
+### Note: u_hat are posterior MEANS, so they are shrunk toward 0; their spread
+### is smaller than tau_hat by design. The gap between the bars and the gold
+### curve is that shrinkage, not lack of fit.
+library(ggplot2)
+
+u_hat   <- colMeans(fit_bayes_int$u)          # posterior mean frailty per PSU
+tau_hat <- sqrt(median(fit_bayes_int$tau2))   # posterior median frailty SD
+
+cat("\n--- frailty summary ---\n")
+cat("J (clusters)  :", length(u_hat), "\n")
+cat("sd(u_hat)     :", round(sd(u_hat), 3), "\n")
+cat("tau_hat       :", round(tau_hat, 3), "\n")
+cat("range(u_hat)  :", round(range(u_hat), 3), "\n")
+cat("tau^2 95% CrI :", round(quantile(fit_bayes_int$tau2, c(0.025, 0.975)), 3), "\n\n")
+
+p_frailty <- ggplot(data.frame(u = u_hat), aes(x = u)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 15, fill = "#202C64", colour = "white", linewidth = 0.3) +
+  # stat_function(fun = dnorm, args = list(mean = 0, sd = tau_hat),
+  #               colour = "#B58500", linewidth = 1) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+  labs(
+    x = expression("Posterior mean cluster frailty " * hat(u)[j]),
+    y = "Density"
+    # subtitle = bquote("Gold: fitted N(0, " * hat(tau)^2 * "),  " * hat(tau) == .(round(tau_hat, 2)))
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.subtitle = element_text(colour = "grey30"))
+
+p_frailty
+
+ggsave(file.path(out_dir, "frailty_hist.png"),
+       plot = p_frailty, width = 8.0, height = 4.4, dpi = 300, bg = "white")
+```
+
+```{r icc}
+### Intraclass correlation of log survival times within a survey PSU.
+icc_posterior <- function(fit, var_eps = 1) {
+  fit$tau2 / (fit$tau2 + fit$sigma2 * var_eps)
+}
+
+icc_draws <- icc_posterior(fit_bayes_int, var_eps = 1)
+
+# Design effect implied by the estimated clustering, at the average PSU size
+n_bar      <- mean(table(cluster_id))
+deff_draws <- 1 + (n_bar - 1) * icc_draws
+
+qfmt <- function(x, digits = 3) {
+  q <- quantile(x, c(0.5, 0.025, 0.975))
+  sprintf("%.*f  [%.*f, %.*f]", digits, q[1], digits, q[2], digits, q[3])
+}
+
+cat("\n--- clustering summary (log-time scale) ---\n")
+cat("median [95% CrI]\n")
+cat("tau^2  :", qfmt(fit_bayes_int$tau2),  "\n")
+cat("sigma^2:", qfmt(fit_bayes_int$sigma2), "\n")
+cat("ICC    :", qfmt(icc_draws),            "\n")
+cat("mean PSU size :", round(n_bar, 1), "\n")
+cat("design effect :", qfmt(deff_draws, 2), "\n")
+cat("P(ICC > 0.01) :", round(mean(icc_draws > 0.01), 3), "\n\n")
+```
 
 ```{r interaction surface}
-reconstruct_interaction_surface <- function(mcmc_out, grid_age = seq(50, 80, by = 1), grid_s = s_grid) {
+reconstruct_interaction_surface <- function(mcmc_out, grid_age = seq(50, 80, by = 1),
+                                            grid_s = s_grid, chunk = 2000) {
   require(mgcv)
-  
-  meta <- mcmc_out$meta
-  sm_tensor <- meta$sm_tensor
-  
-  # 1. Create a dense evaluation grid
+  sm_tensor <- mcmc_out$meta$sm_tensor
+
+  # 1. Dense evaluation grid; column names must match the te() terms (s_grid, age)
   eval_grid <- expand.grid(s_grid = grid_s, age = grid_age)
-  
-  # 2. Get the Prediction Matrix for the interaction
-  # PredictMat handles the absorb.cons constraint internally
+
+  # 2. Tensor basis at the grid.  The sampler builds sm_tensor with
+  #    absorb.cons = FALSE, so this is the raw basis -- the same one used to form
+  #    the integrated design matrix W.  Hence beta(s, a) = Phi %*% b is exactly the
+  #    surface that enters the likelihood.
   Phi_pred <- PredictMat(sm_tensor, eval_grid)
-  
-  # 3. Calculate posterior draws of the surface
-  # beta_surface_draws: (Number of MCMC Samples) x (Number of Grid Points)
-  surface_draws <- mcmc_out$b %*% t(Phi_pred)
-  
-  # 4. Summarize (Mean and 95% Credible Intervals)
-  eval_grid$beta_mean <- colMeans(surface_draws)
-  eval_grid$lower     <- apply(surface_draws, 2, quantile, 0.025)
-  eval_grid$upper     <- apply(surface_draws, 2, quantile, 0.975)
-  
+
+  # 3. Posterior mean: linear in b, so it needs no draws x grid matrix.
+  eval_grid$beta_mean <- as.vector(Phi_pred %*% colMeans(mcmc_out$b))
+
+  # 4. Pointwise 95% CrI from the draws, in blocks of grid points.  The full
+  #    draws x grid matrix is 10,000 x 44,640 (3.6 GB) for this fit; blocking
+  #    caps it at draws x chunk without changing any result.
+  eval_grid$lower <- eval_grid$upper <- NA_real_
+  for (st in seq(1, nrow(eval_grid), by = chunk)) {
+    idx <- st:min(st + chunk - 1, nrow(eval_grid))
+    q   <- apply(mcmc_out$b %*% t(Phi_pred[idx, , drop = FALSE]), 2,
+                 quantile, probs = c(0.025, 0.975))
+    eval_grid$lower[idx] <- q[1, ]
+    eval_grid$upper[idx] <- q[2, ]
+  }
+
   return(eval_grid)
 }
 
 # Get the processed grid
 plot_data <- reconstruct_interaction_surface(fit_bayes_int)
-# Identify where the 95% CI does not contain zero
+# Grid points whose 95% CrI excludes zero (POINTWISE, not a simultaneous band)
 plot_data <- plot_data %>%
   mutate(is_significant = case_when(
     lower > 0 ~ 1,
@@ -200,17 +342,17 @@ plot_data <- plot_data %>%
   ))
 
 # Heatmap Visualization
-p <- ggplot(plot_data, aes(x = s_grid, y = age)) +
+p_beta <- ggplot(plot_data, aes(x = s_grid, y = age)) +
   # Main Heatmap
   geom_tile(aes(fill = beta_mean)) +
   # Add black contour lines with a mapped aesthetic for the legend
-  geom_contour(aes(z = is_significant, color = "Significant (95% CI)"), 
+  geom_contour(aes(z = is_significant, color = "Significant (95% CrI)"), 
                breaks = 0.5, 
                linewidth = 0.5) +
   # Define the gradient for the heatmap
   scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
   # Define the manual color for the contour legend
-  scale_color_manual(name = "", values = c("Significant (95% CI)" = "black")) +
+  scale_color_manual(name = "", values = c("Significant (95% CrI)" = "black")) +
   scale_x_continuous(
     breaks = seq(0, 1, by = 0.25),
     labels = c('12 AM', '6 AM', '12 PM', '6 PM', '12 AM')
@@ -218,17 +360,18 @@ p <- ggplot(plot_data, aes(x = s_grid, y = age)) +
   labs(
     x = "Time of day (s)",
     y = "Age (years)",
-    title = "K_s = 25, K_age = 20",
     fill = expression(beta(s, age))
   ) +
   theme_minimal() +
   theme(
-    legend.title = element_text(size = 11),
-    legend.box = "vertical", # Stacks the two legends
-    plot.title = element_text(face = "bold")
+    # legend.title = element_text(size = 11),
+    legend.box = "horizontal", # both legends on one line
+    # legend.key.width = unit(1.2, "cm"),  # longer colour bar so its tick labels do not collide
+    # plot.title = element_text(face = "bold"),
+    legend.position="bottom"
   ) 
 
-ggsave("beta_k25_k20.png", plot = p, width = 8, height = 6)
+# ggsave("beta_k25_k20.png", plot = p, width = 8, height = 6)
 ```
 
 
@@ -264,122 +407,64 @@ plot_ly(x = ~s_grid_axis, y = ~age_axis, z = ~matrix_data) %>%
   )
 ```
 
-```{r}
-# 1. Select the ages you want to compare
-target_ages <- c(50, 55, 60, 65, 70, 75, 80)
-
-# 2. Filter the reconstructed surface data
-# Note: We find the closest available age in your grid to your targets
-slice_data <- plot_data[plot_data$age %in% 
-                          unique(plot_data$age)[sapply(target_ages, function(x) which.min(abs(unique(plot_data$age) - x)))], ]
-
-# 3. Create the Slice Plot
-ggplot(slice_data, aes(x = s_grid, y = beta_mean, color = as.factor(age), fill = as.factor(age))) +
-  # geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, color = NA) +
-  geom_line(size = 1) +
-  # Add a horizontal reference line at 0
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
-  # Match your requested X-axis formatting
-  scale_x_continuous(
-    breaks = seq(0, 1, by = 0.25),
-    labels = c('12 AM', '6 AM', '12 PM', '6 PM', '12 AM')
-  ) +
-  labs(
-    title = "Comparison of activity effects by age",
-    subtitle = "Slices of beta(s, age) with 95% credible intervals",
-    x = "Time of day (s)",
-    y = expression(beta(s, age)),
-    color = "Age",
-    fill = "Age"
-  ) +
-  theme_minimal()
-```
-
-```{r prediction}
-test_predict <- predict_gibbs_interaction(fit = fit_bayes_int, X_new = X[1:10,], age_new = age[1:10], Z_new = Z[1:10,],
-                                          cluster_id_new = cluster_id[1:10], type = "survival", times = c(1,2,3))
-
-# age <- c(50, 60, 70, 80)
-# BMI <- c(29)
-# CHD <- c("No", "Yes")
-# gender <- c("Male", "Female")
-# MIMS <- data2 %>%
-#   as_tibble() %>%
-#   group_by(MIMS_group) %>%
-#   reframe(across(MIMS, ~ colMeans(.x, na.rm = TRUE)))
-# 
-# new_data = expand.grid(age = age,
-#                      BMI = BMI,
-#                      CHD = CHD,
-#                      gender = gender,
-#                      MIMS = MIMS)
-
-mode_char <- function(x) unique(x)[which.max(tabulate(match(x, unique(x))))]
+```{r predictions}
+## Activity tertiles are defined WITHIN each age; the mean activity profile of each
+## age x tertile is pooled over gender, CHD and BMI.  The covariates used for
+## prediction are fixed separately below (reference subject: male, no CHD, BMI 29).
 new_data <- data2 %>%
-  # Filter for the specific ages of interest
   filter(age %in% c(50, 60, 70, 80)) %>%
-  # Group by the stratifying variables
-  group_by(MIMS_group, age, gender, CHD) %>%
-  # Calculate the averages
-  summarise(
-    MIMS = t(as.matrix(colMeans(MIMS, na.rm = TRUE))),
-    STRAPSU = mode_char(STRAPSU),
-    .groups = "drop" # Un-group the data after summarizing
-  ) %>%
-  mutate(BMI = 29)
+  group_by(age) %>%
+  mutate(MIMS_group = cut(TMIMS,
+                          breaks = quantile(TMIMS, c(0, 1/3, 2/3, 1)),
+                          labels = c("low", "medium", "high"),
+                          include.lowest = TRUE)) %>%
+  group_by(age, MIMS_group) %>%
+  summarise(MIMS   = t(colMeans(MIMS)),        # 1 x 1440 mean profile
+            n_cell = n(),
+            .groups = "drop") %>%
+  mutate(gender = factor("Male", levels = levels(data2$gender)),
+         CHD    = factor("No",   levels = levels(data2$CHD)),
+         BMI    = 29)
+
 Z_new <- model.matrix(~ gender + BMI + CHD, data = new_data)
 
-times = seq(0.1, 10, length = 50)
-pred_surv <- predict_gibbs_interaction(fit = fit_bayes_int, X_new = new_data$MIMS, age_new = new_data$age, Z_new = Z_new,
-                                       cluster_id_new = new_data$STRAPSU, type = "survival", times = times)
+times <- seq(0.1, 9, length = 50)             # 10-year horizon; follow-up ends at 9.25 y
+pred_surv <- predict_gibbs_interaction(fit = fit_bayes_int, X_new = new_data$MIMS,
+                                       age_new = new_data$age, Z_new = Z_new,
+                                       cluster_id_new = NULL,   # frailty = 0 for every curve
+                                       type = "survival", times = times)
 pred_df <- as.data.frame(pred_surv$mean)
 colnames(pred_df) <- paste0("t", times)
 
-# Convert survival predictions to long format
 surv_df <- new_data %>%
-  mutate(id = row_number()) %>%
-  bind_cols(pred_df) %>%   # ← THIS is essential
-  filter(gender == "Male" & CHD == "No") %>%
-  pivot_longer(
-    cols = starts_with("t"),
-    names_to = "time",
-    values_to = "survival"
-  ) %>%
-  mutate(
-    time = as.numeric(gsub("t", "", time)),
-    age = factor(age)
-  )
+  dplyr::select(age, MIMS_group) %>%
+  bind_cols(pred_df) %>%
+  pivot_longer(starts_with("t", ignore.case = FALSE),
+               names_to = "time", values_to = "survival") %>%
+  mutate(time = as.numeric(sub("^t", "", time)),
+         age  = factor(age))
 
-# Plot
-# ggplot(surv_df,
-#        aes(x = time, y = survival,
-#            color = age,
-#            group = interaction(age, id))) +
-#   geom_line(alpha = 0.8) +
-#   facet_wrap(~ MIMS_group) +
-#   labs(
-#     x = "Time",
-#     y = "Survival Probability",
-#     color = "Age",
-#     title = "Female without CHD"
-#   ) +
-#   theme_bw()
-
-ggplot(surv_df,
-       aes(x = time, y = survival,
-           color = MIMS_group,
-           group = interaction(MIMS_group, id))) +
+p_pred <- ggplot(surv_df, aes(x = time, y = survival, colour = MIMS_group)) +
   geom_line(linewidth = 1, alpha = 0.8) +
-  facet_wrap(~ age, labeller = label_both) +
-  ylim(0.4, 1)+
-  xlim(0, 10)+
-  labs(
-    x = "Time",
-    y = "Survival Probability",
-    color = "PA level",
-    title = "Male without CHD"
-  ) +
-  theme_bw()
+  facet_wrap(~ age, labeller = labeller(age = function(x) paste("Age:", x))) +
+  # Okabe-Ito colours: distinct under red-green colour-blindness
+  scale_colour_manual(values = c(low = "#D55E00", medium = "#009E73", high = "#0072B2")) +
+  coord_cartesian(ylim = c(0.4, 1), xlim = c(0, 9)) +
+  labs(x = "Time in years", y = "Survival probability", colour = "PA level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+  # theme(legend.position            = "inside",
+  #       legend.position.inside     = c(0.015, 0.545),
+  #       legend.justification.inside = c(0, 0),
+  #       legend.background          = element_rect(fill = "white", colour = "grey70",
+  #                                                 linewidth = 0.3),
+  #       legend.key.height          = unit(0.4, "cm"),
+  #       legend.title               = element_text(size = 9),
+  #       legend.text                = element_text(size = 8))
+
+p_beta_pred <- p_beta + p_pred
+ggsave(file.path(out_dir, "fig_nhanes_fit.png"),
+       plot = p_beta_pred, width = 10, height = 5, dpi = 500, bg = "white")
 ```
 
 ```{r cross validation}
@@ -654,5 +739,118 @@ fit <- gam(Y ~ age_in_years + bmi + ti(X, S, by = L, bs = c("cr", "cr"), k = c(2
 
 summary(fit_lfcm_mgcv)
 gam.vcomp(fit_lfcm_mgcv)
+```
+
+```{r}
+AGE_REF <- 65   # centring value, for numerical stability only
+
+dat_aft <- data2 %>%
+  mutate(
+    TMIMS_z = as.numeric(scale(TMIMS)),
+    age_c   = age - AGE_REF,
+    age_grp = cut(age, breaks = c(50, 60, 70, 80, Inf), right = FALSE,
+                  labels = c("50-59", "60-69", "70-79", "80+"))
+  )
+
+BANDS <- levels(dat_aft$age_grp)
+
+## ---- activity effect within each age band, and overall --------------------
+## Bands get a linear age term, the pooled row gets ns(age, 3). The 80+ band is
+## skipped automatically: NHANES top-codes age at 80, so age is constant there
+## and the term is not identified.
+fit_row <- function(dd, lab, age_adj = "none") {
+  if (sum(dd$event) < 20) return(NULL)                 # too few events to fit
+  rhs   <- "TMIMS_z + gender + BMI + CHD"
+  n_age <- length(unique(dd$age_c))
+  if (age_adj == "spline" && n_age > 10) rhs <- paste(rhs, "+ ns(age_c, df = 3)")
+  if (age_adj == "linear" && n_age >  3) rhs <- paste(rhs, "+ age_c")
+  f <- tryCatch(
+    survreg(as.formula(paste("Surv(time, event) ~", rhs)),
+            data = dd, dist = "lognormal"),
+    error = function(e) NULL
+  )
+  if (is.null(f)) return(NULL)
+  est <- coef(f)[["TMIMS_z"]]
+  se  <- sqrt(vcov(f)["TMIMS_z", "TMIMS_z"])
+  data.frame(row = lab, n = nrow(dd), events = sum(dd$event),
+             ratio = exp(est), lower = exp(est - 1.96 * se),
+             upper = exp(est + 1.96 * se))
+}
+
+forest_df <- bind_rows(
+  lapply(BANDS, function(g)
+    fit_row(dat_aft[dat_aft$age_grp == g, , drop = FALSE], g, age_adj = "linear")),
+  list(fit_row(dat_aft, "All ages 50+", age_adj = "spline"))
+) %>%
+  mutate(
+    kind  = ifelse(row == "All ages 50+", "overall", "band"),
+    label = sprintf("%s\n%s deaths / %s", row,
+                    format(events, big.mark = ","), format(n, big.mark = ",")),
+    label = factor(label, levels = rev(label))
+  )
+
+## same pooled fit with no age term, to size the confounding for the console
+naive <- fit_row(dat_aft, "pooled, age-unadjusted", age_adj = "none")
+
+## ---- formal interaction test, flexible age main effect --------------------
+fit_int <- survreg(
+  Surv(time, event) ~ TMIMS_z + ns(age_c, df = 3) + TMIMS_z:age_c +
+                      gender + BMI + CHD,
+  data = dat_aft, dist = "lognormal"
+)
+b_int <- coef(fit_int)[["TMIMS_z:age_c"]]
+p_int <- summary(fit_int)$table["TMIMS_z:age_c", "p"]
+
+## ---- console summary ------------------------------------------------------
+cat("\n--- exploratory AFT: does the TMIMS effect move with age? ---\n")
+cat("Survival-time ratio per +1 SD TMIMS, lognormal AFT,\n")
+cat("adjusted for sex, BMI, prevalent CHD and age.\n\n")
+print(forest_df %>%
+        transmute(row, n, events, ratio = round(ratio, 2),
+                  CI = sprintf("[%.2f, %.2f]", lower, upper)),
+      row.names = FALSE)
+cat(sprintf("\nPooled estimate, age-unadjusted : %.2f [%.2f, %.2f]  <- confounded by age\n",
+            naive$ratio, naive$lower, naive$upper))
+k <- nrow(forest_df)
+cat(sprintf("Pooled estimate, ns(age,3)      : %.2f [%.2f, %.2f]  <- in the figure\n",
+            forest_df$ratio[k], forest_df$lower[k], forest_df$upper[k]))
+cat("The first sits above every band because older participants are both less\n")
+cat("active and closer to death; the bands are age-controlled by construction.\n")
+
+cat(sprintf("\nInteraction (ns(age,3) main effect, linear TMIMS x age):\n"))
+cat(sprintf("  %+.5f per year of age, p = %s\n\n",
+            b_int, format.pval(p_int, digits = 3, eps = 1e-4)))
+if (p_int > 0.05) {
+  cat("NOTE: interaction is not significant once the age main effect is\n")
+  cat("flexible. Present this figure as 'the effect is substantial at every\n")
+  cat("age', not as an age trend.\n\n")
+}
+
+## ---- plot -----------------------------------------------------------------
+p_age <- ggplot(forest_df, aes(x = ratio, y = label, colour = kind)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey55") +
+  geom_hline(yintercept = 1.5, colour = "grey85") +
+  geom_errorbar(aes(xmin = lower, xmax = upper), orientation = "y",
+                width = 0.18, linewidth = 0.9) +
+  geom_point(size = 3.4) +
+  scale_colour_manual(values = c(band = "#202C64", overall = "#B58500"),
+                      guide = "none") +
+  scale_x_log10(breaks = c(1, 1.25, 1.5, 1.75, 2, 2.5)) +
+  labs(
+    x = "Survival-time ratio per +1 SD of total daily activity",
+    y = NULL,
+    subtitle = sprintf(
+      "TMIMS x age interaction p = %s",
+      format.pval(p_int, digits = 2, eps = 1e-4)
+    )
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.subtitle      = element_text(colour = "grey35", size = 11),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_blank(),
+    axis.text.y        = element_text(colour = "grey20", lineheight = 1.05)
+  )
+
 ```
 
