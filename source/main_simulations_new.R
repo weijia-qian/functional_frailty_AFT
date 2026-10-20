@@ -76,6 +76,11 @@
 #   surv_{iae,iae_early,iae_late,rmse}      new clusters, frailty = 0
 #   {c_index,ibs,surv_*}_known              known clusters, u_hat
 #   {c_index,ibs,surv_*}_known_marg         same subjects, frailty = 0
+#   surv_ae_p10, ..., surv_ae_p80[_known[_marg]]
+#                                           pointwise mean absolute error of the
+#                                           predicted survival at the 10th, 20th,
+#                                           ..., 80th percentiles of the true event
+#                                           times (lf_ prefix for fcoxFr)
 #   oracle_{c_index,ibs}[_known]            the true survival function's scores
 #                                           (S(t | x, u = 0) for new clusters,
 #                                           S(t | x, u_j) for known clusters)
@@ -214,8 +219,11 @@ surv_metrics <- function(S_hat, S_true) {
   part <- function(i) surv_err(S_hat[, i, drop = FALSE], S_true[, i, drop = FALSE],
                                p_surv[i])[["iae"]]
   all <- surv_err(S_hat, S_true, p_surv)
+  # pointwise mean absolute error at the 10th, 20th, ..., 80th percentiles
+  ae  <- colMeans(abs(S_hat[, i_pct, drop = FALSE] - S_true[, i_pct, drop = FALSE]))
   c(surv_iae = all[["iae"]], surv_iae_early = part(i_early),
-    surv_iae_late = part(i_late), surv_rmse = all[["rmse"]])
+    surv_iae_late = part(i_late), surv_rmse = all[["rmse"]],
+    setNames(ae, paste0("surv_ae_p", round(100 * p_surv[i_pct]))))
 }
 
 # Scale-free shape error with a FIXED expected sign (0 = same shape, 4 = flipped).
@@ -279,6 +287,8 @@ stopifnot(!anyDuplicated(tgrid_surv))
 i_early <- which(p_surv <= HORIZON_Q + 1e-9)    # 5th-40th percentile
 i_late  <- which(p_surv >= HORIZON_Q - 1e-9)    # 40th-80th percentile
 i_ipcw  <- i_early                              # columns of tgrid_surv in tgrid
+i_pct   <- match(round(seq(0.10, SURV_Q, by = 0.10), 3), round(p_surv, 3))
+stopifnot(!anyNA(i_pct))                        # 10th, 20th, ..., 80th percentiles
 
 eps_G      <- 0.05
 km_cens_te <- survival::survfit(survival::Surv(test_data$Y, 1 - test_data$delta) ~ 1)
@@ -654,6 +664,19 @@ for(iter in 1:N_iter){
       lf_surv_iae_late_known_marg  = lf_marg_k[["surv_iae_late"]],
       lf_surv_rmse_known_marg      = lf_marg_k[["surv_rmse"]]
     )
+    # Pointwise errors at the 10th, ..., 80th percentiles, every model and setting.
+    add_ae <- function(df, v, prefix = "", suffix = "") {
+      a <- v[grep("^surv_ae_p", names(v))]
+      df[paste0(prefix, names(a), suffix)] <- as.list(unname(a))
+      df
+    }
+    df_coef <- add_ae(df_coef, e_test)
+    df_coef <- add_ae(df_coef, m_cond,    suffix = "_known")
+    df_coef <- add_ae(df_coef, m_marg,    suffix = "_known_marg")
+    df_coef <- add_ae(df_coef, lf_marg,   prefix = "lf_")
+    df_coef <- add_ae(df_coef, lf_cond_k, prefix = "lf_", suffix = "_known")
+    df_coef <- add_ae(df_coef, lf_marg_k, prefix = "lf_", suffix = "_known_marg")
+
     df_coef[paste0("lf_gamma_est_",  seq_along(lf_gamma_est))]  <- as.list(lf_gamma_est)
     df_coef[paste0("lf_gamma_bias_", seq_along(lf_gamma_bias))] <- as.list(lf_gamma_bias)
 
