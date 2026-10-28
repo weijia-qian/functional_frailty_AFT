@@ -57,11 +57,14 @@
 #
 # Test sets and predictions
 #   *  (no suffix)    NEW clusters, fixed per cell, frailty set to 0 (as in
-#                     main_simulations.R); truth S(t | x, u = 0)
+#                     main_simulations.R); truth S(t | x, u_j) of the subject's
+#                     own (new) cluster for the survival-curve error, and
+#                     S(t | x, u = 0) for the oracle C-index and IBS
 #   *_known           KNOWN clusters, redrawn per iteration, using u_hat_j;
 #                     truth S(t | x, u_j)
 #   *_known_marg      same subjects with the frailty forced to 0; truth
-#                     S(t | x, u = 0)
+#                     S(t | x, u_j), as for *_known, so the gap between the two
+#                     is the value of the estimated frailty
 #
 # Per-iteration output (result$coef)
 # ----------------------------------
@@ -311,9 +314,14 @@ cat("Evaluation horizon: tgrid has", length(tgrid), "points, tau =",
 
 Surv_test <- survival::Surv(test_data$Y, test_data$delta)
 
-# TRUE survival of the test subjects at frailty 0 -- the target of a
-# frailty = 0 prediction.
+# TRUE survival of the test subjects at frailty 0 -- used only for the oracle
+# C-index and IBS of the new-cluster set.
 S_test_true <- sim_test$surv_true(tgrid_surv, test_data$lp, 0)
+# TRUE survival of the test subjects given their own (new) clusters' frailties:
+# the target of the survival-curve error, so that a frailty = 0 prediction is
+# scored against what actually happens to these subjects.
+S_test_cond <- sim_test$surv_true(tgrid_surv, test_data$lp,
+                                  sim_test$u[test_data$cluster_id])
 
 # beta(s) in model-(1) orientation, on the simulation grid.
 beta_true <- sim_test$beta
@@ -443,7 +451,7 @@ for(iter in 1:N_iter){
       S_mat = pred_surv[, i_ipcw, drop = FALSE], time_test = test_data$Y,
       event_test = test_data$delta, time_train = data$Y, event_train = data$delta,
       tgrid = tgrid, G_data = "test", eps_G = eps_G))
-    e_test <- surv_metrics(pred_surv, S_test_true)
+    e_test <- surv_metrics(pred_surv, S_test_cond)
 
     # Oracle: the true survival function scored the same way.
     oracle_c_index <- survAUC::UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_test,
@@ -460,8 +468,8 @@ for(iter in 1:N_iter){
     ##
     ## New subjects in the SAME clusters as the training data, sharing its u_j
     ## via the DGM's `u` argument and held out of the fit.  Scored twice with the
-    ## same fit and subjects: *_known uses u_hat_j against S(t | x, u_j);
-    ## *_known_marg sets the frailty to 0 against S(t | x, u = 0).
+    ## same fit and subjects, both against the TRUE survival S(t | x, u_j):
+    ## *_known uses u_hat_j; *_known_marg sets the frailty to 0.
     ###############################################################
     sim_known <- sim_dgm(N_known, n_cluster, u = sim_data$u)   # share the frailties
     known_data <- sim_known$data
@@ -484,9 +492,8 @@ for(iter in 1:N_iter){
 
     # True survival of the known-cluster subjects on the survival grid (the
     # IPCW metrics use its first columns, i_ipcw).
-    S_known_true      <- sim_known$surv_true(tgrid_surv, known_data$lp,
-                                             sim_data$u[known_data$cluster_id])
-    S_known_marg_true <- sim_known$surv_true(tgrid_surv, known_data$lp, 0)
+    S_known_true <- sim_known$surv_true(tgrid_surv, known_data$lp,
+                                        sim_data$u[known_data$cluster_id])
 
     eval_known <- function(cid, S_truth) {
       lk <- predict_gibbs_frailty(fit, X_new = known_data$X, Z_new = Z_known,
@@ -504,7 +511,7 @@ for(iter in 1:N_iter){
         surv_metrics(sv$mean, S_truth))
     }
     m_cond <- eval_known(known_data$cluster_id, S_known_true)    # uses u_hat_j
-    m_marg <- eval_known(NULL, S_known_marg_true)                # frailty forced to 0
+    m_marg <- eval_known(NULL, S_known_true)                     # frailty forced to 0
 
     oracle_c_index_known <- survAUC::UnoC(Surv.rsp = Surv_train, Surv.rsp.new = Surv_known,
                                           lpnew = -rowSums(S_known_true[, i_ipcw, drop = FALSE]),
@@ -579,10 +586,10 @@ for(iter in 1:N_iter){
         surv_metrics(S, S_truth))
     }
 
-    lf_marg   <- lf_predict(test_data, Z_test, S_test_true)
+    lf_marg   <- lf_predict(test_data, Z_test, S_test_cond)
     lf_cond_k <- lf_predict(known_data, Z_known, S_known_true,
                             cid = known_data$cluster_id)
-    lf_marg_k <- lf_predict(known_data, Z_known, S_known_marg_true)
+    lf_marg_k <- lf_predict(known_data, Z_known, S_known_true)
 
     ###############################################################
     ## assemble

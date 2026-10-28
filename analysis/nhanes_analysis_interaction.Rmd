@@ -85,6 +85,24 @@ age <- data2$age
 Z <- model.matrix(~ gender + BMI + CHD, data = data2)
 ```
 
+```{r age table}
+## Subjects, deaths and censoring rate by 5-year age group in the analysis
+## cohort.  Age is top-coded at 80 in NHANES, so the top group is "80+".
+age_tab <- data2 |>
+  mutate(age_group5 = cut(age, breaks = c(seq(50, 80, 5), Inf), right = FALSE,
+                          labels = c(paste(seq(50, 75, 5), seq(54, 79, 5), sep = "-"), "80+"))) |>
+  group_by(age_group5) |>
+  summarise(n = n(), d = sum(event == 1), .groups = "drop") |>
+  mutate(age_group5 = as.character(age_group5))
+age_tab <- bind_rows(age_tab,
+                     tibble(age_group5 = "Total", n = sum(age_tab$n), d = sum(age_tab$d))) |>
+  transmute(`Age (years)` = age_group5,
+            Subjects = n,
+            `Deaths (censoring rate, %)` = sprintf("%d (%.1f)", d, 100 * (1 - d / n)))
+knitr::kable(age_tab, align = "lrr",
+             caption = "Number of subjects and deaths, with the censoring rate, by 5-year age group.")
+```
+
 ```{r exploratory analysis}
 ## Mean MIMS difference (alive - deceased) by time of day x age band.
 ## Built for two band widths -- 5-year (fig_nhanes.png) and 2-year
